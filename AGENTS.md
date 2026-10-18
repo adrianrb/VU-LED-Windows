@@ -89,12 +89,21 @@ verificação é compilar e rodar o `.exe` no Windows.
 - O fundo usa **alpha mínimo 1** (`clamp(...,1,255)`): pixel com alpha 0 vira
   "click-through" e a janela não poderia mais ser arrastada pelo fundo (em
   100% o fundo fica invisível na prática, mas continua clicável).
+- **Trackbar vertical manda `WM_VSCROLL`, não `WM_HSCROLL`** (`TBS_VERT`
+  inverte o eixo da notificação). O handler trata os dois
+  (`case WM_HSCROLL: case WM_VSCROLL:`); escrever só `WM_HSCROLL` compila e
+  passa em teste sintético (`SendMessage` do `WM_HSCROLL`), mas com o mouse
+  real o polegar mexe e o VU não acompanha — nenhuma mensagem chega ao parent.
 
 ## Interação / preferências
 
 - **Menu**: clique direito na janela → `Opções...` (janela de configurações),
-  `Tamanho:` (submenu de radio: 25%..400%, padrão 100%) e `Sobre...` (mostra
-  "(2026) Copyleft by adrian.barbosa@gmail.com").
+  `Tamanho:` (submenu de radio: 25%..400%, padrão 100%), `Sobre...` (mostra
+  "(2026) Copyleft by adrian.barbosa@gmail.com"), separador e `Sair\tAlt+F4`.
+  `Sair` é `IDM_EXIT` → `DestroyWindow`; o Alt+F4 funciona também sem moldura
+  (`WS_POPUP` sem sysmenu) por uma tabela de aceleradores (`gAccel` +
+  `TranslateAcceleratorW` no loop de mensagens) — sem ela o `DefWindowProc`
+  não fecharia a janela sem sysmenu.
 - **Escala (`ApplyScale`)**: redimensiona mantendo o canto superior esquerdo;
   a % atual é derivada da largura do cliente (base 300 em H / 75 em V), não de
   uma variável — o menu marca a entrada mais próxima. O mínimo de
@@ -111,7 +120,12 @@ verificação é compilar e rodar o `.exe` no Windows.
   área cliente move a janela (drag manual com `SetCapture`, não usar
   `WM_NCLBUTTONDOWN/HTCAPTION` — conflitaria com o duplo clique).
 - **Transparência do fundo** (`gBgTrans`, 0..100, chave `Trans`, padrão 0):
-  slider vertical na janela Opções (`TBS_VERT`, incremento 1, 0 no topo).
+  slider vertical na janela Opções (`TBS_VERT`, incremento 1, **0% embaixo e
+  100% no topo**). O trackbar é linear com o mínimo no topo, então o valor é
+  invertido no código (`TransToSlider`/`SliderToTrans` = 100 − posição).
+  Cada notificação do slider (`WM_VSCROLL`, ver armadilhas) aplica na hora:
+  o VU acompanha o arrasto em tempo real, e ao soltar (`TB_ENDTRACK`) grava a
+  preferência.
   Aplica-se **só ao fundo** (`COL_BG` = preto): LEDs, texto e linha de pico
   ficam opacos. Implementado com `UpdateLayeredWindow` sobre um DIB 32bpp
   (premultiplied) — quando `Trans > 0` a janela fica sem moldura (ver

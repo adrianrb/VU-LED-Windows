@@ -52,6 +52,7 @@ static const COLORREF COL_BG = RGB(0, 0, 0);
 enum {
     IDM_OPTIONS = 100,
     IDM_ABOUT,
+    IDM_EXIT,
     IDM_SIZE = 110,            // ..IDM_SIZE+8 (9 escalas)
     IDC_CHK_TITLE = 200,
     IDC_CHK_VERT,
@@ -203,6 +204,7 @@ static int gIniScale = 100;
 static HWND gMain = nullptr, gOpts = nullptr;
 static HINSTANCE gHInst = nullptr;
 static HANDLE gOnce = nullptr;           // mutex de instância única
+static HACCEL gAccel = nullptr;          // Alt+F4 -> Sair
 static bool gDragging = false;
 static POINT gDragStart = {};
 static RECT  gDragRect = {};
@@ -566,6 +568,12 @@ static void RequestRepaint() {
 // ---------------------------------------------------------------------------
 // Janela "Opções..."
 // ---------------------------------------------------------------------------
+
+// O trackbar vertical tem o mínimo no topo; a transparência é o inverso dele
+// (0% embaixo, 100% no topo).
+static int TransToSlider(int t) { return 100 - t; }
+static int SliderToTrans(int p) { return 100 - p; }
+
 static void SyncOptions() {
     if (!gOpts) return;
     CheckDlgButton(gOpts, IDC_CHK_TITLE,
@@ -580,7 +588,8 @@ static void SyncOptions() {
                    (gLayout == 1) ? L"Alternar para Horizontal"
                                   : L"Alternar para Vertical");
     EnableWindow(GetDlgItem(gOpts, IDC_BTN_COLOR), gScheme == 0);
-    SendMessageW(GetDlgItem(gOpts, IDC_SLIDER_TRANS), TBM_SETPOS, TRUE, gBgTrans);
+    SendMessageW(GetDlgItem(gOpts, IDC_SLIDER_TRANS), TBM_SETPOS, TRUE,
+                 TransToSlider(gBgTrans));
     wchar_t b[16];
     swprintf(b, 16, L"%d%%", gBgTrans);
     SetWindowTextW(GetDlgItem(gOpts, IDC_LBL_TRANS), b);
@@ -628,7 +637,7 @@ static void CreateOptionsControls(HWND h) {
     SendMessageW(sl, WM_SETFONT, (WPARAM)f, TRUE);
     SendMessageW(sl, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
     SendMessageW(sl, TBM_SETTICFREQ, 10, 0);
-    SendMessageW(sl, TBM_SETPOS, TRUE, gBgTrans);
+    SendMessageW(sl, TBM_SETPOS, TRUE, TransToSlider(gBgTrans));
     mk(L"STATIC", L"0%", SS_LEFT, 400, 54, 62, 18, IDC_LBL_TRANS);
     SyncOptions();
 }
@@ -700,12 +709,14 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
         }
         return 0;
 
-    // Trackbar sempre manda WM_HSCROLL, mesmo vertical.
-    case WM_HSCROLL: {
+    // Trackbar vertical manda WM_VSCROLL (TBS_VERT), não WM_HSCROLL; aceitamos
+    // os dois para não depender da orientação do controle.
+    case WM_HSCROLL:
+    case WM_VSCROLL: {
         HWND sl = GetDlgItem(h, IDC_SLIDER_TRANS);
         if (sl && (HWND)lParam == sl) {
-            int v = (int)SendMessageW(sl, TBM_GETPOS, 0, 0);
-            SetBgTrans(v);
+            int v = SliderToTrans((int)SendMessageW(sl, TBM_GETPOS, 0, 0));
+            SetBgTrans(v);   // aplica na hora: o VU acompanha o arrasto
             wchar_t b[16];
             swprintf(b, 16, L"%d%%", gBgTrans);
             SetWindowTextW(GetDlgItem(h, IDC_LBL_TRANS), b);
@@ -789,6 +800,8 @@ static void ShowContextMenu(HWND owner) {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, L"Tamanho:");
 
     AppendMenuW(m, MF_STRING, IDM_ABOUT,   L"Sobre...");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, IDM_EXIT,    L"Sair\tAlt+F4");
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(owner);            // necessário p/ o menu fechar sozinho
@@ -904,6 +917,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             MessageBoxW(hwnd,
                         L"(2026) Copyleft by adrian.barbosa@gmail.com",
                         L"Sobre...", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        case IDM_EXIT:
+            DestroyWindow(hwnd);
             return 0;
         }
         break;
@@ -1025,11 +1041,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     // re-tenta sozinho a cada ~1 s.
     gAudio.Init();
 
+    // Atalho do item "Sair": Alt+F4 precisa de tabela de aceleradores porque a
+    // janela sem moldura é WS_POPUP puro (sem sysmenu) e não fecha sozinha.
+    ACCEL acc[1] = { { (BYTE)(FVIRTKEY | FALT), VK_F4, IDM_EXIT } };
+    gAccel = CreateAcceleratorTableW(acc, 1);
+
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (gAccel && TranslateAcceleratorW(gMain, gAccel, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    if (gAccel) DestroyAcceleratorTable(gAccel);
     if (gSwatchBrush) DeleteObject(gSwatchBrush);
     CoUninitialize();
     return (int)msg.wParam;
