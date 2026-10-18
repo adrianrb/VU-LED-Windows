@@ -27,6 +27,15 @@ x86_64-w64-mingw32-objdump -p VULed.exe | grep "DLL Name"
 Requisitos: `sudo apt install g++-mingw-w64-x86-64`. Não há testes/CI — a
 verificação é compilar e rodar o `.exe` no Windows.
 
+## Versão
+
+- `version.txt` contém a versão em `X.Y.Z` (uma linha, sem `v` prefixo).
+- Padrão semântico simples: **incrementar Z** (patch) em cada alteração que
+  mudar o binário/código; reservar Y para mudanças de comportamento novo
+  (ex.: novo item de menu) e X para quebras grandes. Primeira release: 1.0.0.
+- Após mudar a versão, commitar junto (`version.txt` foi criado no commit
+  raiz junto com o código).
+
 ## Armadilhas (não "conserte" sem verificar)
 
 - **GUID `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`**: o `ksmedia.h` do MinGW-w64 não
