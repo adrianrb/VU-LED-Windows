@@ -82,12 +82,16 @@ verificação é compilar e rodar o `.exe` no Windows.
 - **Layout H/V**: `ToggleLayout()` inverte também altura↔largura da janela
   (300x75 ↔ 75x300) para preservar a área do medidor.
 - **Persistência**: `Salvar` grava `VULed.ini` ao lado do `.exe` (chaves em
-  `[VU]`: `X,Y,W,H,Color,Style`). `Color` é `COLORREF` decimal; `Style` é
-  `H`/`V`. **Título, linha de pico, esquema de cores e cores customizadas do
-  picker não são salvos** — por decisão de escopo (o Save só persiste o que a
-  spec lista: posição, tamanho, cor, estilo).
+  `[VU]`): tudo que a janela Opções expõe + o menu Tamanho — `X,Y,W,H`,
+  `Color` (COLORREF decimal), `Style` (`H`/`V`), `Title` (0/1), `Peak` (0/1),
+  `Scheme` (0/1) e `Scale` (25..400). Único estado **não** salvo: cores
+  customizadas da paleta do picker (16 slots do `CHOOSECOLOR`).
+- `W/H` e `Scale` são redundantes de propósito: `ApplyScale` redimensiona e o
+  Save grava o resultado em `W/H`; no load, `W/H` tem prioridade e `Scale` só
+  é aplicado se `W/H` faltar (aplicar os dois dobraria o tamanho).
 - Preferências são lidas no `wWinMain` *antes* do `CreateWindow` (posição/tam.
-  entram direto na criação); não mover essa leitura para depois.
+  e `Title`, que define o estilo inicial, entram direto na criação); não mover
+  essa leitura para depois.
 
 ## Convenções
 

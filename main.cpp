@@ -193,14 +193,18 @@ static int    gPeakHoldL = 0, gPeakHoldR = 0;
 static HBRUSH  gSwatchBrush = nullptr;
 static COLORREF gCustom[16] = {};
 static std::wstring gIniPath;
-static bool gHasXY = false, gHasWH = false;
+static bool gHasXY = false, gHasWH = false, gHasScale = false;
 static int gIniX = 0, gIniY = 0, gIniW = DEFAULT_W, gIniH = DEFAULT_H;
+static int gIniScale = 100;
 static HWND gMain = nullptr, gOpts = nullptr;
 static HINSTANCE gHInst = nullptr;
 static bool gDragging = false;
 static POINT gDragStart = {};
 static RECT  gDragRect = {};
 static int   gLastLitL = -1, gLastLitR = -1;  // suprime repaint quando ocioso
+
+static void SyncOptions();
+static int CurrentScalePct();
 
 // ---------------------------------------------------------------------------
 // Preferências (.ini ao lado do .exe)
@@ -235,6 +239,16 @@ static void LoadIni() {
                                              gIniPath.c_str());
     GetPrivateProfileStringW(L"VU", L"Style", L"H", b, 64, gIniPath.c_str());
     gLayout = (b[0] == L'V' || b[0] == L'v') ? 1 : 0;
+
+    // Tudo que a janela Opções expõe + escala do menu Tamanho.
+    gTitleBar = (GetPrivateProfileIntW(L"VU", L"Title", 1,
+                                       gIniPath.c_str()) != 0);
+    gShowPeak = (GetPrivateProfileIntW(L"VU", L"Peak", 0,
+                                       gIniPath.c_str()) != 0);
+    gScheme   = (GetPrivateProfileIntW(L"VU", L"Scheme", 0,
+                                       gIniPath.c_str()) != 0) ? 1 : 0;
+    int sc = GetPrivateProfileIntW(L"VU", L"Scale", 100, gIniPath.c_str());
+    if (sc >= 25 && sc <= 400) { gHasScale = true; gIniScale = sc; }
 }
 
 static void SaveIni() {
@@ -253,12 +267,16 @@ static void SaveIni() {
     wr(L"Color", (int)gLedOn);
     WritePrivateProfileStringW(L"VU", L"Style", (gLayout == 1) ? L"V" : L"H",
                                gIniPath.c_str());
+    // Resto da janela Opções + escala do menu Tamanho.
+    wr(L"Title", gTitleBar ? 1 : 0);
+    wr(L"Peak", gShowPeak ? 1 : 0);
+    wr(L"Scheme", gScheme);
+    wr(L"Scale", CurrentScalePct());
 }
 
 // ---------------------------------------------------------------------------
 // Ações
 // ---------------------------------------------------------------------------
-static void SyncOptions();
 
 // Mostra/oculta a barra de título preservando o tamanho da área cliente.
 static void ToggleTitle(HWND hwnd) {
@@ -811,6 +829,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     if (!gMain) { CoUninitialize(); return 1; }
     ShowWindow(gMain, nCmdShow);
     UpdateWindow(gMain);
+
+    // W/H no ini já reflete a escala escolhida (ApplyScale redimensiona e o
+    // Save grava o resultado). A escala sozinha só é aplicada se W/H faltar.
+    if (gHasScale && !gHasWH) ApplyScale(gIniScale);
 
     // Tenta iniciar a captura; se falhar (ex.: sem dispositivo), o timer
     // re-tenta sozinho a cada ~1 s.
