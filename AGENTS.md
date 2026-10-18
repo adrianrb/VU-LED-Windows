@@ -5,14 +5,26 @@ loopback. C++ puro (Win32 + GDI), zero dependências externas.
 
 ## Código
 
-- `main.cpp` — app inteiro (janela + captura WASAPI + desenho dos LEDs)
-- `VULed.exe` — binário compilado (cross-compile a partir do WSL)
+- `src/main.cpp` — app inteiro (janela + captura WASAPI + desenho dos LEDs)
+- `output/VULed.exe` — binário compilado (cross-compile a partir do WSL)
+- `output/VULed.ini` — preferências persistidas; fica ao lado do `.exe` porque
+  é ali que o app lê/grava (`MakeIniPath` usa `GetModuleFileNameW`)
+- `build/` — temporários de build (objetos); **não** versionado (`.gitignore`)
 
 ## Build (MinGW-w64 a partir do WSL)
 
 ```sh
-x86_64-w64-mingw32-g++ -O2 -std=c++17 -municode -mwindows -static \
-  -o VULed.exe main.cpp -lole32 -luuid -lgdi32 -luser32 -lcomdlg32
+make          # compila src/main.cpp -> output/VULed.exe (objeto em build/)
+make clean    # apaga só os temporários (build/), preserva output/
+```
+
+Sem `make` (duas etapas, para os temporários irem para `build/`):
+
+```sh
+x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -municode -mwindows \
+  -c src/main.cpp -o build/main.o
+x86_64-w64-mingw32-g++ -static -municode -mwindows -o output/VULed.exe \
+  build/main.o -lole32 -luuid -lgdi32 -luser32 -lcomdlg32
 ```
 
 `-static` é **obrigatório**: sem ele o `.exe` depende de `libstdc++-6.dll` /
@@ -20,7 +32,7 @@ x86_64-w64-mingw32-g++ -O2 -std=c++17 -municode -mwindows -static \
 derrubam a execução com "libstdc++-6.dll não foi encontrado". Validar com:
 
 ```sh
-x86_64-w64-mingw32-objdump -p VULed.exe | grep "DLL Name"
+x86_64-w64-mingw32-objdump -p output/VULed.exe | grep "DLL Name"
 # deve listar só DLLs de sistema (GDI32, USER32, ole32, comdlg32, KERNEL32, msvcrt)
 ```
 
@@ -40,7 +52,7 @@ verificação é compilar e rodar o `.exe` no Windows.
 
 - **GUID `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`**: o `ksmedia.h` do MinGW-w64 não
   fornece a definição (dá `undefined reference`). O código define o GUID
-  manualmente no topo de `main.cpp`. Não inclua `ksmedia.h` nem `initguid.h`
+  manualmente no topo de `src/main.cpp`. Não inclua `ksmedia.h` nem `initguid.h`
   para "resolver" isso.
 - **WASAPI loopback só entrega dados quando há playback ativo.** Sem som
   tocando, as barras ficam zeradas — é comportamento esperado, não bug.
@@ -81,7 +93,8 @@ verificação é compilar e rodar o `.exe` no Windows.
   `WM_NCLBUTTONDOWN/HTCAPTION` — conflitaria com o duplo clique).
 - **Layout H/V**: `ToggleLayout()` inverte também altura↔largura da janela
   (300x75 ↔ 75x300) para preservar a área do medidor.
-- **Persistência**: grava `VULed.ini` ao lado do `.exe` (chaves em `[VU]`):
+- **Persistência**: grava `VULed.ini` ao lado do `.exe` (hoje
+  `output/VULed.ini`, chaves em `[VU]`):
   tudo que a janela Opções expõe + o menu Tamanho — `X,Y,W,H`, `Color`
   (COLORREF decimal), `Style` (`H`/`V`), `Title` (0/1), `Peak` (0/1),
   `Scheme` (0/1) e `Scale` (25..400). Além do botão `Salvar`, o estado é
