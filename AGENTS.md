@@ -54,15 +54,27 @@ verificação é compilar e rodar o `.exe` no Windows.
   necessário `timeBeginPeriod` ou thread dedicada — decisão consciente atual é
   não usar.
 - **Flicker**: `WM_PAINT` usa double buffering (DC memória + um único `BitBlt`)
-  e o timer só chama `InvalidateRect` se houve mudança de LEDs ou o hold está
-  acima de zero (`gLastLitL/R`). Repintar a tela direto a 100 Hz, ou continuar
-  repaintando com tudo em zero (caso "sem som"), causa flicker visível —
-  preservar essas duas proteções ao mexer no desenho.
+  e o timer só chama `InvalidateRect` se houve mudança de LEDs, o hold está
+  acima de zero, ou (`gShowPeak` e pico ativo — `peakBusy`). Repintar a tela
+  direto a 100 Hz, ou continuar repaintando com tudo em zero (caso "sem som"),
+  causa flicker visível — preservar essas proteções ao mexer no desenho.
 
 ## Interação / preferências
 
-- **Menu**: clique direito na janela → `Opções...` (janela de configurações) e
-  `Sobre...` (mostra "(2026) Copyleft by adrian.barbosa@gmail.com").
+- **Menu**: clique direito na janela → `Opções...` (janela de configurações),
+  `Tamanho:` (submenu de radio: 25%..400%, padrão 100%) e `Sobre...` (mostra
+  "(2026) Copyleft by adrian.barbosa@gmail.com").
+- **Escala (`ApplyScale`)**: redimensiona mantendo o canto superior esquerdo;
+  a % atual é derivada da largura do cliente (base 300 em H / 75 em V), não de
+  uma variável — o menu marca a entrada mais próxima. O mínimo de
+  `WM_GETMINMAXINFO` é dinâmico (25% + moldura) para não bloquear presets
+  pequenos; clamps do `LoadIni` também são baixos (64x40) por isso.
+- **Linha de pico**: marca branca de 2px na posição do pico; hold de 600 ms
+  (`PEAK_HOLD_TICKS`) e queda `PEAK_FALL` por tick. Desligar zera `gPeakL/R`
+  (senão a marca fica congelada).
+- **Esquema de cores** (`gScheme`): 0 = simples (cor única `gLedOn`,
+  picker habilitado); 1 = faixas Verde/Amarelo/Vermelho em 70%/85% da posição
+  do LED — o picker fica desabilitado e cada LED apagado usa a própria cor ×30%.
 - **Barra de título**: duplo clique em qualquer lugar alterna; a janela perde
   também thickframe/sysmenu (vira `WS_POPUP` puro). Sem título, arrastar pela
   área cliente move a janela (drag manual com `SetCapture`, não usar
@@ -71,15 +83,16 @@ verificação é compilar e rodar o `.exe` no Windows.
   (300x75 ↔ 75x300) para preservar a área do medidor.
 - **Persistência**: `Salvar` grava `VULed.ini` ao lado do `.exe` (chaves em
   `[VU]`: `X,Y,W,H,Color,Style`). `Color` é `COLORREF` decimal; `Style` é
-  `H`/`V`. **Estado do título e cores customizadas do picker não são salvos** —
-  por decisão de escopo, só o que a janela Opções lista.
+  `H`/`V`. **Título, linha de pico, esquema de cores e cores customizadas do
+  picker não são salvos** — por decisão de escopo (o Save só persiste o que a
+  spec lista: posição, tamanho, cor, estilo).
 - Preferências são lidas no `wWinMain` *antes* do `CreateWindow` (posição/tam.
   entram direto na criação); não mover essa leitura para depois.
 
 ## Convenções
 
 - Unicode obrigatório (`wWinMain`, `UNICODE` definido no código; flag
-  `-municode` no build). Janela padrão 300x75 (redimensionável, mín. 160x80),
-  fundo preto, LEDs ciano padrão `RGB(0,230,255)` (configurável; apagado é a
-  cor acesa × 30%), 26 LEDs por canal, escala −60..0 dB, ataque instantâneo +
-  decaimento por tick (`RELEASE`).
+  `-municode` no build). Janela padrão 300x75 (redimensionável; mínimo dinâmico
+  = escala 25% + moldura), fundo preto, LEDs ciano padrão `RGB(0,230,255)`
+  (configurável; apagado é a cor acesa × 30%), 26 LEDs por canal,
+  escala −60..0 dB, ataque instantâneo + decaimento por tick (`RELEASE`).

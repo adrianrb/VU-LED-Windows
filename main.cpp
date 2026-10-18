@@ -2,12 +2,14 @@
 // Depende apenas de Win32/GDI/WASAPI/ComDlg. Compilável com MSVC ou MinGW-w64.
 //
 // Interação:
-//  - Clique direito → menu: "Opções..." (janela de configurações) e "Sobre...".
+//  - Clique direito → menu: "Opções...", "Tamanho:" (escala 25%..400%) e
+//    "Sobre...".
 //  - Duplo clique em qualquer lugar da janela → mostra/oculta barra de título.
 //  - Janela redimensionável; sem barra de título, arrastar pelo cliente move.
-//  - Opções: título on/off, Horizontal/Vertical (troca W↔H), cor do LED
+//  - Opções: título on/off, Horizontal/Vertical (troca W↔H), linha de pico,
+//    esquema de cores (simples ou verde/amarelo/vermelho), cor do LED
 //    (ChooseColor) e "Salvar" → grava X,Y,W,H,cor,estilo em VULed.ini (ao lado
-//    do .exe).
+//    do .exe). Linha de pico e esquema NÃO são persistidos (escopo do Save).
 //
 // Áudio: a cada 10 ms drena o buffer de loopback do dispositivo de render
 // padrão e calcula o pico por canal. Loopback só entrega dados quando há
@@ -49,8 +51,12 @@ static const COLORREF COL_BG = RGB(0, 0, 0);
 enum {
     IDM_OPTIONS = 100,
     IDM_ABOUT,
+    IDM_SIZE = 110,            // ..IDM_SIZE+8 (9 escalas)
     IDC_CHK_TITLE = 200,
     IDC_CHK_VERT,
+    IDC_CHK_PEAK,
+    IDC_RAD_SIMPLE,
+    IDC_RAD_SCHEME,
     IDC_BTN_COLOR,
     IDC_BTN_SAVE,
     IDC_BTN_CLOSE,
@@ -59,9 +65,15 @@ enum {
     IDT_AUDIO = 1,
 };
 
+static const int SCALES[] = { 25, 50, 75, 100, 125, 150, 200, 300, 400 };
+static const int SCALE_COUNT = (int)(sizeof(SCALES) / sizeof(SCALES[0]));
+
+static const int PEAK_HOLD_TICKS = 60;   // hold do pico: 600 ms (60 × 10 ms)
+static const float PEAK_FALL = 0.97f;    // queda do pico após o hold
+
 static const wchar_t* MAIN_CLASS = L"VULedMeter";
 static const wchar_t* OPT_CLASS  = L"VUOptions";
-static const int OPT_CW = 264, OPT_CH = 148;
+static const int OPT_CW = 348, OPT_CH = 234;
 
 // ---------------------------------------------------------------------------
 // Captura WASAPI loopback do dispositivo de render padrão
@@ -174,6 +186,10 @@ static float gHoldL = 0.0f, gHoldR = 0.0f;   // níveis com decaimento
 static int    gLayout  = 0;                   // 0 = horizontal, 1 = vertical
 static bool   gTitleBar = true;
 static COLORREF gLedOn = RGB(0, 230, 255);
+static bool   gShowPeak = false;         // linha de pico visível
+static int    gScheme = 0;               // 0 = simples, 1 = verde/amarelo/vermelho
+static float  gPeakL = 0.0f, gPeakR = 0.0f;    // pico com hold
+static int    gPeakHoldL = 0, gPeakHoldR = 0;
 static HBRUSH  gSwatchBrush = nullptr;
 static COLORREF gCustom[16] = {};
 static std::wstring gIniPath;
@@ -210,9 +226,10 @@ static void LoadIni() {
     GetPrivateProfileStringW(L"VU", L"W", L"", b, 64, gIniPath.c_str());
     if (*b) {
         gHasWH = true;
-        gIniW  = std::max(160, (int)wcstol(b, nullptr, 10));
+        // Mínimos baixos de propósito: presets de 25% geram janela ~91px larga.
+        gIniW  = std::max(64, (int)wcstol(b, nullptr, 10));
         GetPrivateProfileStringW(L"VU", L"H", L"60", b, 64, gIniPath.c_str());
-        gIniH  = std::max(60, (int)wcstol(b, nullptr, 10));
+        gIniH  = std::max(40, (int)wcstol(b, nullptr, 10));
     }
     gLedOn = (COLORREF)GetPrivateProfileIntW(L"VU", L"Color", (int)gLedOn,
                                              gIniPath.c_str());
@@ -311,9 +328,27 @@ static int LevelToLitCount(float level) {
     return (int)std::lround(t * LED_COUNT);
 }
 
-static void DrawLed(HDC hdc, int x, int y, int w, int h, bool on, COLORREF off) {
+// Cor acesa do LED i conforme o esquema:
+//  0 (simples): cor única (gLedOn).
+//  1 (faixas): Verde da posição 0, Amarelo a partir de 70%, Vermelho a 85%.
+static COLORREF LedColor(int i) {
+    if (gScheme == 0) return gLedOn;
+    float pos = (i + 1) / (float)LED_COUNT;
+    if (pos < 0.70f) return RGB(0, 220, 60);
+    if (pos < 0.85f) return RGB(240, 210, 0);
+    return RGB(240, 40, 40);
+}
+
+// Posição normalizada (0..1) do nível na escala — usada p/ a linha de pico.
+static float LevelToPos(float level) {
+    if (level <= 1e-5f) return 0.0f;
+    float db = 20.0f * std::log10(level);
+    return std::clamp((db - DB_MIN) / (0.0f - DB_MIN), 0.0f, 1.0f);
+}
+
+static void DrawLed(HDC hdc, int x, int y, int w, int h, COLORREF color) {
     if (w < 1 || h < 1) return;
-    HBRUSH b = CreateSolidBrush(on ? gLedOn : off);
+    HBRUSH b = CreateSolidBrush(color);
     HGDIOBJ old = SelectObject(hdc, b);
     RoundRect(hdc, x, y, x + w, y + h, 3, 3);
     SelectObject(hdc, old);
@@ -326,12 +361,13 @@ static void DrawAll(HDC hdc, int W, int H) {
     FillRect(hdc, &rc, bg);
     DeleteObject(bg);
 
-    COLORREF off = LedOffColor(gLedOn);
+    COLORREF offAll = LedOffColor(gLedOn);
     HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(170, 170, 170));
 
     int lit[2] = { LevelToLitCount(gHoldL), LevelToLitCount(gHoldR) };
+    float ppos[2] = { LevelToPos(gPeakL), LevelToPos(gPeakR) };
 
     if (gLayout == 0) {
         // Horizontal: barras empilhadas (L em cima, R embaixo), crescem p/ direita.
@@ -344,9 +380,20 @@ static void DrawAll(HDC hdc, int W, int H) {
             int y = mt + ch * (rowH + rowGap);
             for (int i = 0; i < LED_COUNT; ++i) {
                 int x = areaX + i * (segW + LED_GAP);
-                DrawLed(hdc, x, y, segW, rowH, i < lit[ch], off);
+                COLORREF on = LedColor(i);
+                DrawLed(hdc, x, y, segW, rowH, (i < lit[ch]) ? on
+                        : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
             TextOut(hdc, 3, y + rowH / 2 - 6, (ch == 0) ? L"L" : L"R", 1);
+            // Linha de pico: marca vertical branca na posição do pico.
+            if (gShowPeak && ppos[ch] > 0.0f) {
+                int x = areaX + (int)std::lround(ppos[ch] * areaW) - 1;
+                x = std::clamp(x, areaX, areaX + areaW - 2);
+                RECT pk = { x, y - 1, x + 2, y + rowH + 1 };
+                HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
+                FillRect(hdc, &pk, b);
+                DeleteObject(b);
+            }
         }
     } else {
         // Vertical: colunas lado a lado (L esq., R dir.), crescem de baixo p/ cima.
@@ -359,10 +406,21 @@ static void DrawAll(HDC hdc, int W, int H) {
             int x = mx + ch * (colW + colGap);
             for (int i = 0; i < LED_COUNT; ++i) {
                 int y = yBottom - (i + 1) * segH - i * LED_GAP;
-                DrawLed(hdc, x, y, colW, segH, i < lit[ch], off);
+                COLORREF on = LedColor(i);
+                DrawLed(hdc, x, y, colW, segH, (i < lit[ch]) ? on
+                        : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
             TextOut(hdc, x + colW / 2 - 4, H - labelH + 2,
                     (ch == 0) ? L"L" : L"R", 1);
+            // Linha de pico: marca horizontal branca na posição do pico.
+            if (gShowPeak && ppos[ch] > 0.0f) {
+                int y = yBottom - (int)std::lround(ppos[ch] * areaH) - 1;
+                y = std::clamp(y, mt, yBottom - 2);
+                RECT pk = { x - 1, y, x + colW + 1, y + 2 };
+                HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
+                FillRect(hdc, &pk, b);
+                DeleteObject(b);
+            }
         }
     }
     SelectObject(hdc, oldPen);
@@ -375,9 +433,13 @@ static void SyncOptions() {
     if (!gOpts) return;
     CheckDlgButton(gOpts, IDC_CHK_TITLE, gTitleBar ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(gOpts, IDC_CHK_VERT,  gLayout == 1 ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(gOpts, IDC_CHK_PEAK,  gShowPeak ? BST_CHECKED : BST_UNCHECKED);
+    CheckRadioButton(gOpts, IDC_RAD_SIMPLE, IDC_RAD_SCHEME,
+                     (gScheme == 0) ? IDC_RAD_SIMPLE : IDC_RAD_SCHEME);
     SetWindowTextW(GetDlgItem(gOpts, IDC_CHK_VERT),
                    (gLayout == 1) ? L"Alternar para Horizontal"
                                   : L"Alternar para Vertical");
+    EnableWindow(GetDlgItem(gOpts, IDC_BTN_COLOR), gScheme == 0);
 }
 
 static void CreateOptionsControls(HWND h) {
@@ -391,17 +453,26 @@ static void CreateOptionsControls(HWND h) {
         return c;
     };
     mk(L"BUTTON", L"Exibir barra de título", BS_AUTOCHECKBOX,
-       12, 14, 230, 18, IDC_CHK_TITLE);
+       12, 14, 320, 18, IDC_CHK_TITLE);
     mk(L"BUTTON", L"Alternar para Vertical", BS_AUTOCHECKBOX,
-       12, 40, 230, 18, IDC_CHK_VERT);
+       12, 40, 320, 18, IDC_CHK_VERT);
+    mk(L"BUTTON", L"Exibir linha de pico", BS_AUTOCHECKBOX,
+       12, 66, 320, 18, IDC_CHK_PEAK);
+    mk(L"STATIC", L"Esquema de cores:", SS_LEFT,
+       12, 94, 180, 16, 0);
+    mk(L"BUTTON", L"Simples (atual)", BS_AUTORADIOBUTTON | WS_GROUP,
+       24, 112, 300, 18, IDC_RAD_SIMPLE);
+    mk(L"BUTTON", L"Verde (0) | Amarelo (70%) | Vermelho (85%)",
+       BS_AUTORADIOBUTTON,
+       24, 132, 310, 18, IDC_RAD_SCHEME);
     mk(L"BUTTON", L"Escolher cor do LED...", BS_PUSHBUTTON,
-       12, 70, 170, 26, IDC_BTN_COLOR);
+       12, 162, 170, 26, IDC_BTN_COLOR);
     mk(L"STATIC", L"", WS_BORDER | SS_NOTIFY,
-       192, 70, 56, 26, IDC_SWATCH);
+       192, 162, 56, 26, IDC_SWATCH);
     mk(L"BUTTON", L"Salvar", BS_PUSHBUTTON,
-       12, 108, 90, 26, IDC_BTN_SAVE);
+       12, 200, 90, 26, IDC_BTN_SAVE);
     mk(L"BUTTON", L"Fechar", BS_PUSHBUTTON,
-       112, 108, 90, 26, IDC_BTN_CLOSE);
+       112, 200, 90, 26, IDC_BTN_CLOSE);
     SyncOptions();
 }
 
@@ -450,6 +521,17 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
             switch (LOWORD(wParam)) {
             case IDC_CHK_TITLE: ToggleTitle(gMain); break;
             case IDC_CHK_VERT:  ToggleLayout();     break;
+            case IDC_CHK_PEAK:
+                gShowPeak = (IsDlgButtonChecked(h, IDC_CHK_PEAK) == BST_CHECKED);
+                if (!gShowPeak) gPeakL = gPeakR = 0.0f;  // limpa a marca
+                InvalidateRect(gMain, nullptr, FALSE);
+                break;
+            case IDC_RAD_SIMPLE:
+            case IDC_RAD_SCHEME:
+                gScheme = (LOWORD(wParam) == IDC_RAD_SIMPLE) ? 0 : 1;
+                SyncOptions();
+                InvalidateRect(gMain, nullptr, FALSE);
+                break;
             case IDC_BTN_COLOR: PickColor(h);       break;
             case IDC_BTN_SAVE:
                 SaveIni();
@@ -487,9 +569,54 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
 // ---------------------------------------------------------------------------
 // Janela principal
 // ---------------------------------------------------------------------------
+// % atual = largura do cliente ÷ largura base (300 em H, 75 em V) — vale para
+// qualquer layout, pois a base acompanha a orientação.
+static int CurrentScalePct() {
+    if (!gMain) return 100;
+    RECT rc;
+    GetClientRect(gMain, &rc);
+    int baseW = (gLayout == 0) ? DEFAULT_W : DEFAULT_H;
+    if (rc.right <= 0) return 100;
+    return (int)std::lround(rc.right * 100.0 / baseW);
+}
+
+// Redimensiona a janela mantendo o canto superior esquerdo.
+static void ApplyScale(int pct) {
+    int cw  = ((gLayout == 0) ? DEFAULT_W  : DEFAULT_H) * pct / 100;
+    int chh = ((gLayout == 0) ? DEFAULT_H : DEFAULT_W)  * pct / 100;
+    cw  = std::max(16, cw);
+    chh = std::max(12, chh);
+    DWORD style = (DWORD)GetWindowLongPtr(gMain, GWL_STYLE);
+    RECT rc = { 0, 0, cw, chh };
+    AdjustWindowRect(&rc, style, FALSE);
+    SetWindowPos(gMain, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(gMain, nullptr, FALSE);
+}
+
 static void ShowContextMenu(HWND owner) {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_OPTIONS, L"Opções...");
+
+    // "Tamanho:" → radio com a escala atual (ou a mais próxima).
+    HMENU sz = CreatePopupMenu();
+    int cur = CurrentScalePct();
+    int nearIdx = 0;
+    for (int i = 0; i < SCALE_COUNT; ++i) {
+        int d = SCALES[i] - cur;
+        if (d < 0) d = -d;
+        int dbest = SCALES[nearIdx] - cur;
+        if (dbest < 0) dbest = -dbest;
+        if (d < dbest) nearIdx = i;
+    }
+    for (int i = 0; i < SCALE_COUNT; ++i) {
+        wchar_t lbl[8];
+        swprintf(lbl, 8, L"%d%%", SCALES[i]);
+        AppendMenuW(sz, MF_STRING, IDM_SIZE + i, lbl);
+    }
+    CheckMenuRadioItem(sz, 0, SCALE_COUNT - 1, nearIdx, MF_BYPOSITION);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, L"Tamanho:");
+
     AppendMenuW(m, MF_STRING, IDM_ABOUT,   L"Sobre...");
     POINT pt;
     GetCursorPos(&pt);
@@ -516,12 +643,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (gHoldL < 1e-5f) gHoldL = 0.0f;
             if (gHoldR < 1e-5f) gHoldR = 0.0f;
 
+            // Linha de pico: segue o pico, segura 600 ms, depois cai.
+            auto updPeak = [](float lvl, float& peak, int& hold) {
+                if (lvl >= peak) { peak = lvl; hold = PEAK_HOLD_TICKS; }
+                else if (hold > 0) { --hold; }
+                else { peak *= PEAK_FALL; if (peak < 1e-5f) peak = 0.0f; }
+            };
+            updPeak(pl, gPeakL, gPeakHoldL);
+            updPeak(pr, gPeakR, gPeakHoldR);
+
             int litL = LevelToLitCount(gHoldL);
             int litR = LevelToLitCount(gHoldR);
             // Sem som (holds zerados) e LEDs já apagados → não repinta.
             // Evita repaint contínuo a 100 Hz quando ocioso (flicker).
+            bool peakBusy = gShowPeak && (gPeakL > 0.0f || gPeakR > 0.0f);
             if (litL != gLastLitL || litR != gLastLitR ||
-                gHoldL > 0.0f || gHoldR > 0.0f) {
+                gHoldL > 0.0f || gHoldR > 0.0f || peakBusy) {
                 gLastLitL = litL;
                 gLastLitR = litR;
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -572,6 +709,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDM_OPTIONS: ShowOptions(); return 0;
+        default:
+            if (LOWORD(wParam) >= IDM_SIZE &&
+                LOWORD(wParam) < IDM_SIZE + SCALE_COUNT) {
+                ApplyScale(SCALES[LOWORD(wParam) - IDM_SIZE]);
+                return 0;
+            }
+            break;
         case IDM_ABOUT:
             MessageBoxW(hwnd,
                         L"(2026) Copyleft by adrian.barbosa@gmail.com",
@@ -580,9 +724,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         break;
 
-    case WM_GETMINMAXINFO:                    // janela nunca menor que isso
-        ((MINMAXINFO*)lParam)->ptMinTrackSize = { 160, 80 };
+    case WM_GETMINMAXINFO: {
+        // Mínimo = o tamanho da menor escala (25%) + moldura; impede fechar a
+        // janela ou espremer demais, mas não bloqueia os presets pequenos.
+        int cw  = DEFAULT_W * SCALES[0] / 100;   // 25% de 300
+        int chh = DEFAULT_H * SCALES[0] / 100;   // 25% de 75
+        RECT rc = { 0, 0, std::max(48, cw), std::max(24, chh) };
+        AdjustWindowRect(&rc, (DWORD)GetWindowLongPtr(hwnd, GWL_STYLE), FALSE);
+        ((MINMAXINFO*)lParam)->ptMinTrackSize = { rc.right, rc.bottom };
         return 0;
+    }
 
     // Sem barra de título: arrastar pela área cliente move a janela.
     case WM_LBUTTONDOWN:
