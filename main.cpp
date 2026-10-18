@@ -300,6 +300,9 @@ static void ToggleTitle(HWND hwnd) {
 
     gTitleBar = (GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION) != 0;
     SyncOptions();
+    // Alternar a barra de título é uma ação rápida (duplo clique), fora do
+    // botão "Salvar": grava na hora para o próximo start respeitar o estado.
+    SaveIni();
 }
 
 // Alterna horizontal/vertical; inverte também a altura/largura da janela para
@@ -781,6 +784,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
 
     case WM_DESTROY:
+        SaveIni();          // persiste tudo (inclusive toggles fora do "Salvar")
         KillTimer(hwnd, IDT_AUDIO);
         gAudio.Shutdown();
         if (gOpts) DestroyWindow(gOpts);
