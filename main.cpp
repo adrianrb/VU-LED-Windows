@@ -1,0 +1,676 @@
+// VU de LEDs mono (L+R) — lê a saída padrão do Windows via WASAPI loopback.
+// Depende apenas de Win32/GDI/WASAPI/ComDlg. Compilável com MSVC ou MinGW-w64.
+//
+// Interação:
+//  - Clique direito → menu: "Opções..." (janela de configurações) e "Sobre...".
+//  - Duplo clique em qualquer lugar da janela → mostra/oculta barra de título.
+//  - Janela redimensionável; sem barra de título, arrastar pelo cliente move.
+//  - Opções: título on/off, Horizontal/Vertical (troca W↔H), cor do LED
+//    (ChooseColor) e "Salvar" → grava X,Y,W,H,cor,estilo em VULed.ini (ao lado
+//    do .exe).
+//
+// Áudio: a cada 10 ms drena o buffer de loopback do dispositivo de render
+// padrão e calcula o pico por canal. Loopback só entrega dados quando há
+// playback ativo; sem som, as barras ficam zeradas (comportamento esperado).
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#include <windows.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <mmreg.h>
+#include <commdlg.h>
+#include <cmath>
+#include <algorithm>
+#include <cstdint>
+#include <cwchar>
+#include <string>
+
+// ksmedia.h do MinGW-w64 não fornece a definição deste GUID; definimos manualmente.
+static const GUID GUID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = {
+    0x00000003, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+};
+
+// ---------------------------------------------------------------------------
+// Constantes / layout
+// ---------------------------------------------------------------------------
+static const int DEFAULT_W  = 300;
+static const int DEFAULT_H  = 75;
+static const int LED_COUNT  = 26;
+static const int LED_GAP    = 2;
+static const float DB_MIN   = -60.0f;
+static const float RELEASE  = 0.85f;  // decaimento por tick de 10 ms
+
+static const COLORREF COL_BG = RGB(0, 0, 0);
+
+// IDs de comando/controles
+enum {
+    IDM_OPTIONS = 100,
+    IDM_ABOUT,
+    IDC_CHK_TITLE = 200,
+    IDC_CHK_VERT,
+    IDC_BTN_COLOR,
+    IDC_BTN_SAVE,
+    IDC_BTN_CLOSE,
+    IDC_SWATCH,
+    IDC_SAVE_FEEDBACK = 300,
+    IDT_AUDIO = 1,
+};
+
+static const wchar_t* MAIN_CLASS = L"VULedMeter";
+static const wchar_t* OPT_CLASS  = L"VUOptions";
+static const int OPT_CW = 264, OPT_CH = 148;
+
+// ---------------------------------------------------------------------------
+// Captura WASAPI loopback do dispositivo de render padrão
+// ---------------------------------------------------------------------------
+struct AudioCapture {
+    IMMDeviceEnumerator* enumerator = nullptr;
+    IMMDevice*           device     = nullptr;
+    IAudioClient*        client     = nullptr;
+    IAudioCaptureClient* capture    = nullptr;
+    WAVEFORMATEX*        mix        = nullptr;
+    bool  isFloat = true;
+    int   channels = 0;
+    bool  ready = false;
+    double retryAccum = 0.0;
+
+    void Shutdown() {
+        if (capture) { capture->Release(); capture = nullptr; }
+        if (client)  { client->Release();  client  = nullptr; }
+        if (mix)     { CoTaskMemFree(mix); mix      = nullptr; }
+        if (device)  { device->Release();  device   = nullptr; }
+        ready = false;
+    }
+
+    bool Init() {
+        Shutdown();
+        HRESULT hr;
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                              CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                              (void**)&enumerator);
+        if (FAILED(hr)) return false;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (FAILED(hr)) { Shutdown(); return false; }
+        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                              (void**)&client);
+        if (FAILED(hr)) { Shutdown(); return false; }
+        hr = client->GetMixFormat(&mix);
+        if (FAILED(hr)) { Shutdown(); return false; }
+
+        // Determina o formato: float (padrão) ou PCM 16-bit.
+        if (mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            WAVEFORMATEXTENSIBLE* ext = (WAVEFORMATEXTENSIBLE*)mix;
+            isFloat = IsEqualGUID(ext->SubFormat, GUID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+        } else {
+            isFloat = (mix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
+        }
+        channels = mix->nChannels;
+
+        // Loopback: captura o que o renderizador de destino está tocando.
+        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                0, 0, mix, nullptr);
+        if (FAILED(hr)) { Shutdown(); return false; }
+        hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture);
+        if (FAILED(hr)) { Shutdown(); return false; }
+        hr = client->Start();
+        if (FAILED(hr)) { Shutdown(); return false; }
+
+        ready = true;
+        return true;
+    }
+
+    // Drena todos os pacotes disponíveis e devolve o pico por canal (0..1).
+    void Poll(float& peakL, float& peakR) {
+        peakL = peakR = 0.0f;
+        if (!ready) {
+            // Sem áudio (dispositivo removido, etc.): tenta reinit a cada ~1 s.
+            retryAccum += 0.010;
+            if (retryAccum >= 1.0) { retryAccum = 0.0; Init(); }
+            return;
+        }
+
+        for (;;) {
+            BYTE* data = nullptr;
+            UINT32 frames = 0;
+            DWORD flags = 0;
+            HRESULT hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+            if (hr == AUDCLNT_S_BUFFER_EMPTY) break;
+            if (FAILED(hr)) { Shutdown(); return; }
+
+            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && data) {
+                if (isFloat) {
+                    const float* p = (const float*)data;
+                    for (UINT32 i = 0; i < frames; ++i) {
+                        float l = std::fabs(p[i * channels]);
+                        float r = (channels > 1) ? std::fabs(p[i * channels + 1]) : l;
+                        if (l > peakL) peakL = l;
+                        if (r > peakR) peakR = r;
+                    }
+                } else {
+                    const int16_t* p = (const int16_t*)data;
+                    for (UINT32 i = 0; i < frames; ++i) {
+                        float l = std::fabs(p[i * channels] / 32768.0f);
+                        float r = (channels > 1)
+                                ? std::fabs(p[i * channels + 1] / 32768.0f) : l;
+                        if (l > peakL) peakL = l;
+                        if (r > peakR) peakR = r;
+                    }
+                }
+            }
+            capture->ReleaseBuffer(frames);
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Estado global
+// ---------------------------------------------------------------------------
+static AudioCapture gAudio;
+static float gHoldL = 0.0f, gHoldR = 0.0f;   // níveis com decaimento
+static int    gLayout  = 0;                   // 0 = horizontal, 1 = vertical
+static bool   gTitleBar = true;
+static COLORREF gLedOn = RGB(0, 230, 255);
+static HBRUSH  gSwatchBrush = nullptr;
+static COLORREF gCustom[16] = {};
+static std::wstring gIniPath;
+static bool gHasXY = false, gHasWH = false;
+static int gIniX = 0, gIniY = 0, gIniW = DEFAULT_W, gIniH = DEFAULT_H;
+static HWND gMain = nullptr, gOpts = nullptr;
+static HINSTANCE gHInst = nullptr;
+static bool gDragging = false;
+static POINT gDragStart = {};
+static RECT  gDragRect = {};
+static int   gLastLitL = -1, gLastLitR = -1;  // suprime repaint quando ocioso
+
+// ---------------------------------------------------------------------------
+// Preferências (.ini ao lado do .exe)
+// ---------------------------------------------------------------------------
+static void MakeIniPath() {
+    wchar_t buf[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring p(buf);
+    size_t pos = p.find_last_of(L'\\');
+    gIniPath = (pos == std::wstring::npos ? L"." : p.substr(0, pos)) + L"\\VULed.ini";
+}
+
+static void LoadIni() {
+    if (gIniPath.empty()) return;
+    wchar_t b[64] = {};
+    GetPrivateProfileStringW(L"VU", L"X", L"", b, 64, gIniPath.c_str());
+    if (*b) {
+        gHasXY = true;
+        gIniX  = (int)wcstol(b, nullptr, 10);
+        GetPrivateProfileStringW(L"VU", L"Y", L"0", b, 64, gIniPath.c_str());
+        gIniY  = (int)wcstol(b, nullptr, 10);
+    }
+    GetPrivateProfileStringW(L"VU", L"W", L"", b, 64, gIniPath.c_str());
+    if (*b) {
+        gHasWH = true;
+        gIniW  = std::max(160, (int)wcstol(b, nullptr, 10));
+        GetPrivateProfileStringW(L"VU", L"H", L"60", b, 64, gIniPath.c_str());
+        gIniH  = std::max(60, (int)wcstol(b, nullptr, 10));
+    }
+    gLedOn = (COLORREF)GetPrivateProfileIntW(L"VU", L"Color", (int)gLedOn,
+                                             gIniPath.c_str());
+    GetPrivateProfileStringW(L"VU", L"Style", L"H", b, 64, gIniPath.c_str());
+    gLayout = (b[0] == L'V' || b[0] == L'v') ? 1 : 0;
+}
+
+static void SaveIni() {
+    if (gIniPath.empty()) return;
+    RECT rc;
+    GetWindowRect(gMain, &rc);
+    wchar_t b[64];
+    auto wr = [&](const wchar_t* key, int v) {
+        swprintf(b, 64, L"%d", v);
+        WritePrivateProfileStringW(L"VU", key, b, gIniPath.c_str());
+    };
+    wr(L"X", rc.left);
+    wr(L"Y", rc.top);
+    wr(L"W", rc.right - rc.left);
+    wr(L"H", rc.bottom - rc.top);
+    wr(L"Color", (int)gLedOn);
+    WritePrivateProfileStringW(L"VU", L"Style", (gLayout == 1) ? L"V" : L"H",
+                               gIniPath.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Ações
+// ---------------------------------------------------------------------------
+static void SyncOptions();
+
+// Mostra/oculta a barra de título preservando o tamanho da área cliente.
+static void ToggleTitle(HWND hwnd) {
+    LONG_PTR st = GetWindowLongPtr(hwnd, GWL_STYLE);
+    bool show = !(st & WS_CAPTION);
+    if (show) {
+        st = (st & ~WS_POPUP) | WS_OVERLAPPEDWINDOW;
+    } else {
+        st = (st & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU |
+                     WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_POPUP;
+    }
+    st |= WS_VISIBLE;
+    SetWindowLongPtr(hwnd, GWL_STYLE, st);
+
+    RECT crc;
+    GetClientRect(hwnd, &crc);
+    RECT adj = crc;
+    AdjustWindowRect(&adj, (DWORD)st, FALSE);
+    SetWindowPos(hwnd, nullptr, 0, 0, adj.right - adj.left, adj.bottom - adj.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    gTitleBar = (GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION) != 0;
+    SyncOptions();
+}
+
+// Alterna horizontal/vertical; inverte também a altura/largura da janela para
+// preservar a "área" do medidor (300x75 vira 75x300 e vice-versa).
+static void ToggleLayout() {
+    gLayout ^= 1;
+    RECT rc;
+    GetWindowRect(gMain, &rc);
+    SetWindowPos(gMain, nullptr, 0, 0, rc.bottom - rc.top, rc.right - rc.left,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SyncOptions();
+    InvalidateRect(gMain, nullptr, FALSE);
+}
+
+static void PickColor(HWND owner) {
+    static COLORREF init = 0;
+    init = gLedOn;
+    CHOOSECOLORW cc = {};
+    cc.lStructSize  = sizeof(cc);
+    cc.hwndOwner    = owner;
+    cc.rgbResult    = init;
+    cc.lpCustColors = gCustom;
+    cc.Flags        = CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR;
+    if (ChooseColorW(&cc)) {
+        gLedOn = cc.rgbResult;
+        if (gSwatchBrush) DeleteObject(gSwatchBrush);
+        gSwatchBrush = CreateSolidBrush(gLedOn);
+        InvalidateRect(GetDlgItem(gOpts, IDC_SWATCH), nullptr, TRUE);
+        InvalidateRect(gMain, nullptr, FALSE);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Desenho
+// ---------------------------------------------------------------------------
+static COLORREF LedOffColor(COLORREF c) {
+    return RGB(GetRValue(c) * 3 / 10, GetGValue(c) * 3 / 10, GetBValue(c) * 3 / 10);
+}
+
+static int LevelToLitCount(float level) {
+    if (level <= 1e-5f) return 0;
+    float db = 20.0f * std::log10(level);
+    float t  = std::clamp((db - DB_MIN) / (0.0f - DB_MIN), 0.0f, 1.0f);
+    return (int)std::lround(t * LED_COUNT);
+}
+
+static void DrawLed(HDC hdc, int x, int y, int w, int h, bool on, COLORREF off) {
+    if (w < 1 || h < 1) return;
+    HBRUSH b = CreateSolidBrush(on ? gLedOn : off);
+    HGDIOBJ old = SelectObject(hdc, b);
+    RoundRect(hdc, x, y, x + w, y + h, 3, 3);
+    SelectObject(hdc, old);
+    DeleteObject(b);
+}
+
+static void DrawAll(HDC hdc, int W, int H) {
+    RECT rc = { 0, 0, W, H };
+    HBRUSH bg = CreateSolidBrush(COL_BG);
+    FillRect(hdc, &rc, bg);
+    DeleteObject(bg);
+
+    COLORREF off = LedOffColor(gLedOn);
+    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(170, 170, 170));
+
+    int lit[2] = { LevelToLitCount(gHoldL), LevelToLitCount(gHoldR) };
+
+    if (gLayout == 0) {
+        // Horizontal: barras empilhadas (L em cima, R embaixo), crescem p/ direita.
+        const int labelW = 14, mt = 6, mb = 6, rowGap = 8;
+        int rowH = std::max(4, (H - mt - mb - rowGap) / 2);
+        int areaX = labelW;
+        int areaW = std::max(LED_COUNT, W - labelW - 6);
+        int segW  = (areaW - (LED_COUNT - 1) * LED_GAP) / LED_COUNT;
+        for (int ch = 0; ch < 2; ++ch) {
+            int y = mt + ch * (rowH + rowGap);
+            for (int i = 0; i < LED_COUNT; ++i) {
+                int x = areaX + i * (segW + LED_GAP);
+                DrawLed(hdc, x, y, segW, rowH, i < lit[ch], off);
+            }
+            TextOut(hdc, 3, y + rowH / 2 - 6, (ch == 0) ? L"L" : L"R", 1);
+        }
+    } else {
+        // Vertical: colunas lado a lado (L esq., R dir.), crescem de baixo p/ cima.
+        const int labelH = 14, mt = 6, mx = 6, colGap = 10;
+        int areaH   = std::max(LED_COUNT, H - mt - labelH);
+        int segH    = (areaH - (LED_COUNT - 1) * LED_GAP) / LED_COUNT;
+        int colW    = std::max(4, (W - 2 * mx - colGap) / 2);
+        int yBottom = H - labelH;
+        for (int ch = 0; ch < 2; ++ch) {
+            int x = mx + ch * (colW + colGap);
+            for (int i = 0; i < LED_COUNT; ++i) {
+                int y = yBottom - (i + 1) * segH - i * LED_GAP;
+                DrawLed(hdc, x, y, colW, segH, i < lit[ch], off);
+            }
+            TextOut(hdc, x + colW / 2 - 4, H - labelH + 2,
+                    (ch == 0) ? L"L" : L"R", 1);
+        }
+    }
+    SelectObject(hdc, oldPen);
+}
+
+// ---------------------------------------------------------------------------
+// Janela "Opções..."
+// ---------------------------------------------------------------------------
+static void SyncOptions() {
+    if (!gOpts) return;
+    CheckDlgButton(gOpts, IDC_CHK_TITLE, gTitleBar ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(gOpts, IDC_CHK_VERT,  gLayout == 1 ? BST_CHECKED : BST_UNCHECKED);
+    SetWindowTextW(GetDlgItem(gOpts, IDC_CHK_VERT),
+                   (gLayout == 1) ? L"Alternar para Horizontal"
+                                  : L"Alternar para Vertical");
+}
+
+static void CreateOptionsControls(HWND h) {
+    HFONT f = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    auto mk = [&](const wchar_t* cls, const wchar_t* txt, DWORD style,
+                  int x, int y, int w, int hh, UINT id) {
+        HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style,
+                                 x, y, w, hh, h, (HMENU)(INT_PTR)id,
+                                 gHInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)f, TRUE);
+        return c;
+    };
+    mk(L"BUTTON", L"Exibir barra de título", BS_AUTOCHECKBOX,
+       12, 14, 230, 18, IDC_CHK_TITLE);
+    mk(L"BUTTON", L"Alternar para Vertical", BS_AUTOCHECKBOX,
+       12, 40, 230, 18, IDC_CHK_VERT);
+    mk(L"BUTTON", L"Escolher cor do LED...", BS_PUSHBUTTON,
+       12, 70, 170, 26, IDC_BTN_COLOR);
+    mk(L"STATIC", L"", WS_BORDER | SS_NOTIFY,
+       192, 70, 56, 26, IDC_SWATCH);
+    mk(L"BUTTON", L"Salvar", BS_PUSHBUTTON,
+       12, 108, 90, 26, IDC_BTN_SAVE);
+    mk(L"BUTTON", L"Fechar", BS_PUSHBUTTON,
+       112, 108, 90, 26, IDC_BTN_CLOSE);
+    SyncOptions();
+}
+
+static void ShowOptions() {
+    if (!gOpts) {
+        RECT rc = { 0, 0, OPT_CW, OPT_CH };
+        AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+        gOpts = CreateWindowExW(0, OPT_CLASS, L"Opções...",
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                                CW_USEDEFAULT, CW_USEDEFAULT,
+                                rc.right - rc.left, rc.bottom - rc.top,
+                                nullptr, nullptr, gHInst, nullptr);
+        if (!gOpts) return;
+    }
+    SyncOptions();
+
+    // Posiciona junto à janela do VU, centralizada, dentro da área de trabalho.
+    RECT vr, or_;
+    GetWindowRect(gMain, &vr);
+    GetWindowRect(gOpts, &or_);
+    int ow = or_.right - or_.left, oh = or_.bottom - or_.top;
+    int x = vr.left + ((vr.right - vr.left) - ow) / 2;
+    int y = vr.bottom + 4;
+    HMONITOR mon = MonitorFromRect(&vr, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(mon, &mi);
+    if (x + ow > mi.rcWork.right)  x = mi.rcWork.right - ow - 4;
+    if (y + oh > mi.rcWork.bottom) y = vr.top - oh - 4;   // sem espaço abaixo → acima
+    if (x < mi.rcWork.left)   x = mi.rcWork.left + 4;
+    if (y < mi.rcWork.top)    y = mi.rcWork.top + 4;
+
+    SetWindowPos(gOpts, HWND_TOP, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_SHOWWINDOW);
+    ShowWindow(gOpts, SW_SHOW);
+    SetForegroundWindow(gOpts);
+}
+
+static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE:
+        CreateOptionsControls(h);
+        return 0;
+
+    case WM_COMMAND:
+        if (HIWORD(wParam) == BN_CLICKED) {
+            switch (LOWORD(wParam)) {
+            case IDC_CHK_TITLE: ToggleTitle(gMain); break;
+            case IDC_CHK_VERT:  ToggleLayout();     break;
+            case IDC_BTN_COLOR: PickColor(h);       break;
+            case IDC_BTN_SAVE:
+                SaveIni();
+                SetWindowTextW(GetDlgItem(h, IDC_BTN_SAVE), L"Salvo!");
+                SetTimer(h, IDC_SAVE_FEEDBACK, 1200, nullptr);
+                break;
+            case IDC_BTN_CLOSE: ShowWindow(h, SW_HIDE); break;
+            }
+        }
+        return 0;
+
+    case WM_TIMER:
+        if (wParam == IDC_SAVE_FEEDBACK) {
+            SetWindowTextW(GetDlgItem(h, IDC_BTN_SAVE), L"Salvar");
+            KillTimer(h, IDC_SAVE_FEEDBACK);
+        }
+        return 0;
+
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)lParam == GetDlgItem(h, IDC_SWATCH) && gSwatchBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkColor(hdc, gLedOn);
+            SetTextColor(hdc, gLedOn);
+            return (LRESULT)gSwatchBrush;
+        }
+        break;
+
+    case WM_CLOSE:           // o X apenas esconde; destruir fica para a saída
+        ShowWindow(h, SW_HIDE);
+        return 0;
+    }
+    return DefWindowProc(h, msg, wParam, lParam);
+}
+
+// ---------------------------------------------------------------------------
+// Janela principal
+// ---------------------------------------------------------------------------
+static void ShowContextMenu(HWND owner) {
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, IDM_OPTIONS, L"Opções...");
+    AppendMenuW(m, MF_STRING, IDM_ABOUT,   L"Sobre...");
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(owner);            // necessário p/ o menu fechar sozinho
+    TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+                   pt.x, pt.y, 0, owner, nullptr);
+    PostMessageW(owner, WM_NULL, 0, 0);
+    DestroyMenu(m);
+}
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE:
+        SetTimer(hwnd, IDT_AUDIO, 10, nullptr);  // tick de 10 ms
+        return 0;
+
+    case WM_TIMER:
+        if (wParam == IDT_AUDIO) {
+            float pl, pr;
+            gAudio.Poll(pl, pr);
+            // Ataque instantâneo, decaimento suave.
+            gHoldL = (pl > gHoldL) ? pl : (gHoldL * RELEASE);
+            gHoldR = (pr > gHoldR) ? pr : (gHoldR * RELEASE);
+            if (gHoldL < 1e-5f) gHoldL = 0.0f;
+            if (gHoldR < 1e-5f) gHoldR = 0.0f;
+
+            int litL = LevelToLitCount(gHoldL);
+            int litR = LevelToLitCount(gHoldR);
+            // Sem som (holds zerados) e LEDs já apagados → não repinta.
+            // Evita repaint contínuo a 100 Hz quando ocioso (flicker).
+            if (litL != gLastLitL || litR != gLastLitR ||
+                gHoldL > 0.0f || gHoldR > 0.0f) {
+                gLastLitL = litL;
+                gLastLitR = litR;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        return 0;
+
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HBRUSH b = CreateSolidBrush(COL_BG);
+        FillRect(hdc, &rc, b);
+        DeleteObject(b);
+        return 1;
+    }
+
+    case WM_PAINT: {
+        // Double buffering: desenha tudo em uma DC memória e copia uma única
+        // vez com BitBlt — sem flicker do GDI pintando direto na tela.
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int W = rc.right, H = rc.bottom;
+        if (W > 0 && H > 0) {
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, W, H);
+            HGDIOBJ oldBmp = SelectObject(mem, bmp);
+            DrawAll(mem, W, H);
+            BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, oldBmp);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_LBUTTONDBLCLK:                    // duplo clique → barra de título
+        ToggleTitle(hwnd);
+        return 0;
+
+    case WM_RBUTTONUP:
+        ShowContextMenu(hwnd);
+        return 0;
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDM_OPTIONS: ShowOptions(); return 0;
+        case IDM_ABOUT:
+            MessageBoxW(hwnd,
+                        L"(2026) Copyleft by adrian.barbosa@gmail.com",
+                        L"Sobre...", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        break;
+
+    case WM_GETMINMAXINFO:                    // janela nunca menor que isso
+        ((MINMAXINFO*)lParam)->ptMinTrackSize = { 160, 80 };
+        return 0;
+
+    // Sem barra de título: arrastar pela área cliente move a janela.
+    case WM_LBUTTONDOWN:
+        if (!gTitleBar) {
+            gDragging = true;
+            GetCursorPos(&gDragStart);
+            GetWindowRect(hwnd, &gDragRect);
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        if (gDragging && (wParam & MK_LBUTTON)) {
+            POINT p;
+            GetCursorPos(&p);
+            SetWindowPos(hwnd, nullptr,
+                         gDragRect.left + (p.x - gDragStart.x),
+                         gDragRect.top  + (p.y - gDragStart.y),
+                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+    case WM_CAPTURECHANGED:
+        if (gDragging) {
+            gDragging = false;
+            if (msg == WM_LBUTTONUP && GetCapture() == hwnd) ReleaseCapture();
+        }
+        return 0;
+
+    case WM_DESTROY:
+        KillTimer(hwnd, IDT_AUDIO);
+        gAudio.Shutdown();
+        if (gOpts) DestroyWindow(gOpts);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// ---------------------------------------------------------------------------
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    gHInst = hInst;
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    MakeIniPath();
+    LoadIni();
+    gSwatchBrush = CreateSolidBrush(gLedOn);
+
+    WNDCLASSEX wc = { sizeof(wc) };
+    wc.style         = CS_DBLCLKS;           // habilita WM_LBUTTONDBLCLK
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
+    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = MAIN_CLASS;
+    RegisterClassEx(&wc);
+
+    WNDCLASSEX oc = { sizeof(oc) };
+    oc.lpfnWndProc   = OptionsProc;
+    oc.hInstance     = hInst;
+    oc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+    oc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    oc.lpszClassName = OPT_CLASS;
+    RegisterClassEx(&oc);
+
+    DWORD style = gTitleBar ? WS_OVERLAPPEDWINDOW : WS_POPUP;
+    RECT rc = { 0, 0, DEFAULT_W, DEFAULT_H };
+    AdjustWindowRect(&rc, style, FALSE);
+    int w = gHasWH ? gIniW : rc.right - rc.left;
+    int h = gHasWH ? gIniH : rc.bottom - rc.top;
+    int x = gHasXY ? gIniX : CW_USEDEFAULT;
+    int y = gHasXY ? gIniY : CW_USEDEFAULT;
+
+    gMain = CreateWindowExW(0, MAIN_CLASS, L"VU — Saída Padrão", style,
+                            x, y, w, h, nullptr, nullptr, hInst, nullptr);
+    if (!gMain) { CoUninitialize(); return 1; }
+    ShowWindow(gMain, nCmdShow);
+    UpdateWindow(gMain);
+
+    // Tenta iniciar a captura; se falhar (ex.: sem dispositivo), o timer
+    // re-tenta sozinho a cada ~1 s.
+    gAudio.Init();
+
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    if (gSwatchBrush) DeleteObject(gSwatchBrush);
+    CoUninitialize();
+    return (int)msg.wParam;
+}
