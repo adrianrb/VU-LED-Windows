@@ -24,7 +24,7 @@ Sem `make` (duas etapas, para os temporários irem para `build/`):
 x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -municode -mwindows \
   -c src/main.cpp -o build/main.o
 x86_64-w64-mingw32-g++ -static -municode -mwindows -o output/VULed.exe \
-  build/main.o -lole32 -luuid -lgdi32 -luser32 -lcomdlg32
+  build/main.o -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32
 ```
 
 `-static` é **obrigatório**: sem ele o `.exe` depende de `libstdc++-6.dll` /
@@ -33,7 +33,8 @@ derrubam a execução com "libstdc++-6.dll não foi encontrado". Validar com:
 
 ```sh
 x86_64-w64-mingw32-objdump -p output/VULed.exe | grep "DLL Name"
-# deve listar só DLLs de sistema (GDI32, USER32, ole32, comdlg32, KERNEL32, msvcrt)
+# deve listar só DLLs de sistema (GDI32, USER32, ole32, comdlg32, comctl32,
+# KERNEL32, msvcrt)
 ```
 
 Requisitos: `sudo apt install g++-mingw-w64-x86-64`. Não há testes/CI — a
@@ -69,7 +70,25 @@ verificação é compilar e rodar o `.exe` no Windows.
   e o timer só chama `InvalidateRect` se houve mudança de LEDs, o hold está
   acima de zero, ou (`gShowPeak` e pico ativo — `peakBusy`). Repintar a tela
   direto a 100 Hz, ou continuar repaintando com tudo em zero (caso "sem som"),
-  causa flicker visível — preservar essas proteções ao mexer no desenho.
+  causa flicker visível — preservar essas proteções ao mexer no desenho. No
+  modo camada o repaint sai de `RequestRepaint()`, que chama `RenderLayered()`
+  na hora (janela em camadas não repinta por `InvalidateRect`).
+- **Transparência ⇒ janela em camadas.** Com `Trans > 0` o app usa
+  `WS_EX_LAYERED` + `UpdateLayeredWindow` (alpha por pixel), e isso
+  **substitui a janela inteira**: a moldura/barra de título do sistema deixa de
+  ser desenhada. Por isso, com transparência ativa a janela é sempre `WS_POPUP`
+  e o checkbox "Exibir barra de título" fica desabilitado (a preferência
+  `Title` é preservada e volta a valer quando `Trans` volta a 0, e
+  `ToggleTitle` ignora o duplo clique nesse estado). Não tentar "consertar"
+  mantendo `WS_OVERLAPPEDWINDOW`: o `UpdateLayeredWindow` cobre a moldura e
+  sobra lixo visual.
+- **`GdiFlush()` antes de ler/escrever os pixels do DIB** em `RenderLayered`:
+  o GDI mantém as operações em buffer; sem o flush o loop de alpha lê lixo e o
+  flush posterior sobrescreve os alphas — a janela fica 100% invisível (sem
+  erro nenhum: `UpdateLayeredWindow` retorna sucesso).
+- O fundo usa **alpha mínimo 1** (`clamp(...,1,255)`): pixel com alpha 0 vira
+  "click-through" e a janela não poderia mais ser arrastada pelo fundo (em
+  100% o fundo fica invisível na prática, mas continua clicável).
 
 ## Interação / preferências
 
@@ -91,14 +110,25 @@ verificação é compilar e rodar o `.exe` no Windows.
   também thickframe/sysmenu (vira `WS_POPUP` puro). Sem título, arrastar pela
   área cliente move a janela (drag manual com `SetCapture`, não usar
   `WM_NCLBUTTONDOWN/HTCAPTION` — conflitaria com o duplo clique).
+- **Transparência do fundo** (`gBgTrans`, 0..100, chave `Trans`, padrão 0):
+  slider vertical na janela Opções (`TBS_VERT`, incremento 1, 0 no topo).
+  Aplica-se **só ao fundo** (`COL_BG` = preto): LEDs, texto e linha de pico
+  ficam opacos. Implementado com `UpdateLayeredWindow` sobre um DIB 32bpp
+  (premultiplied) — quando `Trans > 0` a janela fica sem moldura (ver
+  armadilhas). Com `Trans = 0` o caminho é o GDI normal com double buffering.
+- **Instância única**: mutex nomeado `Local\VULedMeter_SingleInstance` criado
+  no início do `wWinMain`; se já existir, a segunda instância traz a janela da
+  primeira para frente (`ShowWindow(SW_RESTORE)` + `SetForegroundWindow`) e
+  sai sem criar nada.
 - **Layout H/V**: `ToggleLayout()` inverte também altura↔largura da janela
   (300x75 ↔ 75x300) para preservar a área do medidor.
 - **Persistência**: grava `VULed.ini` ao lado do `.exe` (hoje
   `output/VULed.ini`, chaves em `[VU]`):
   tudo que a janela Opções expõe + o menu Tamanho — `X,Y,W,H`, `Color`
   (COLORREF decimal), `Style` (`H`/`V`), `Title` (0/1), `Peak` (0/1),
-  `Scheme` (0/1) e `Scale` (25..400). Além do botão `Salvar`, o estado é
-  gravado **automaticamente** em `WM_DESTROY` (sair) e em `ToggleTitle` — o
+  `Scheme` (0/1), `Trans` (0..100) e `Scale` (25..400). Além do botão `Salvar`,
+  o estado é gravado **automaticamente** em `WM_DESTROY` (sair), em
+  `ToggleTitle` e ao soltar o slider de transparência (`TB_ENDTRACK`) — o
   duplo clique alterna a barra de título fora do `Salvar`, então sem esse
   save imediato o app reiniciava sempre com título. Único estado **não** salvo:
   cores customizadas da paleta do picker (16 slots do `CHOOSECOLOR`).

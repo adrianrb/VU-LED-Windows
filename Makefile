@@ -9,7 +9,7 @@
 CXX      := x86_64-w64-mingw32-g++
 CXXFLAGS := -O2 -std=c++17 -Wall -municode -mwindows
 LDFLAGS  := -static -municode -mwindows
-LDLIBS   := -lole32 -luuid -lgdi32 -luser32 -lcomdlg32
+LDLIBS   := -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32
 
 SRC := src/main.cpp
 OBJ := build/main.o

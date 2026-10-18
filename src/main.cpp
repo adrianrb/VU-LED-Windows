@@ -23,6 +23,7 @@
 #include <audioclient.h>
 #include <mmreg.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -61,6 +62,8 @@ enum {
     IDC_BTN_SAVE,
     IDC_BTN_CLOSE,
     IDC_SWATCH,
+    IDC_SLIDER_TRANS,
+    IDC_LBL_TRANS,
     IDC_SAVE_FEEDBACK = 300,
     IDT_AUDIO = 1,
 };
@@ -73,7 +76,7 @@ static const float PEAK_FALL = 0.97f;    // queda do pico após o hold
 
 static const wchar_t* MAIN_CLASS = L"VULedMeter";
 static const wchar_t* OPT_CLASS  = L"VUOptions";
-static const int OPT_CW = 348, OPT_CH = 234;
+static const int OPT_CW = 470, OPT_CH = 240;
 
 // ---------------------------------------------------------------------------
 // Captura WASAPI loopback do dispositivo de render padrão
@@ -188,6 +191,7 @@ static bool   gTitleBar = true;
 static COLORREF gLedOn = RGB(0, 230, 255);
 static bool   gShowPeak = false;         // linha de pico visível
 static int    gScheme = 0;               // 0 = simples, 1 = verde/amarelo/vermelho
+static int    gBgTrans = 0;              // 0..100 = % de transparência do fundo
 static float  gPeakL = 0.0f, gPeakR = 0.0f;    // pico com hold
 static int    gPeakHoldL = 0, gPeakHoldR = 0;
 static HBRUSH  gSwatchBrush = nullptr;
@@ -198,13 +202,21 @@ static int gIniX = 0, gIniY = 0, gIniW = DEFAULT_W, gIniH = DEFAULT_H;
 static int gIniScale = 100;
 static HWND gMain = nullptr, gOpts = nullptr;
 static HINSTANCE gHInst = nullptr;
+static HANDLE gOnce = nullptr;           // mutex de instância única
 static bool gDragging = false;
 static POINT gDragStart = {};
 static RECT  gDragRect = {};
 static int   gLastLitL = -1, gLastLitR = -1;  // suprime repaint quando ocioso
 
+// Buffer 32bpp do modo camada (transparência do fundo).
+static HBITMAP gDib = nullptr;
+static HDC     gDibDC = nullptr;
+static void*   gDibBits = nullptr;
+static int     gDibW = 0, gDibH = 0;
+
 static void SyncOptions();
 static int CurrentScalePct();
+static void RequestRepaint();
 
 // ---------------------------------------------------------------------------
 // Preferências (.ini ao lado do .exe)
@@ -247,6 +259,8 @@ static void LoadIni() {
                                        gIniPath.c_str()) != 0);
     gScheme   = (GetPrivateProfileIntW(L"VU", L"Scheme", 0,
                                        gIniPath.c_str()) != 0) ? 1 : 0;
+    int tr = GetPrivateProfileIntW(L"VU", L"Trans", 0, gIniPath.c_str());
+    gBgTrans = std::clamp(tr, 0, 100);
     int sc = GetPrivateProfileIntW(L"VU", L"Scale", 100, gIniPath.c_str());
     if (sc >= 25 && sc <= 400) { gHasScale = true; gIniScale = sc; }
 }
@@ -272,33 +286,62 @@ static void SaveIni() {
     wr(L"Peak", gShowPeak ? 1 : 0);
     wr(L"Scheme", gScheme);
     wr(L"Scale", CurrentScalePct());
+    wr(L"Trans", gBgTrans);
 }
 
 // ---------------------------------------------------------------------------
 // Ações
 // ---------------------------------------------------------------------------
 
-// Mostra/oculta a barra de título preservando o tamanho da área cliente.
-static void ToggleTitle(HWND hwnd) {
-    LONG_PTR st = GetWindowLongPtr(hwnd, GWL_STYLE);
-    bool show = !(st & WS_CAPTION);
-    if (show) {
+// Aplica moldura/barra de título preservando o tamanho da área cliente.
+static void ApplyFrameStyle(bool frame) {
+    // Lê o cliente ANTES de mexer no estilo: depois do SetWindowLongPtr o
+    // GetClientRect já pode refletir o estilo novo (popup ⇒ cliente = janela),
+    // o que fazia o tamanho "derivar" a cada alternância.
+    RECT crc;
+    GetClientRect(gMain, &crc);
+
+    LONG_PTR st = GetWindowLongPtr(gMain, GWL_STYLE);
+    if (frame) {
         st = (st & ~WS_POPUP) | WS_OVERLAPPEDWINDOW;
     } else {
         st = (st & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU |
                      WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_POPUP;
     }
     st |= WS_VISIBLE;
-    SetWindowLongPtr(hwnd, GWL_STYLE, st);
+    SetWindowLongPtr(gMain, GWL_STYLE, st);
 
-    RECT crc;
-    GetClientRect(hwnd, &crc);
     RECT adj = crc;
     AdjustWindowRect(&adj, (DWORD)st, FALSE);
-    SetWindowPos(hwnd, nullptr, 0, 0, adj.right - adj.left, adj.bottom - adj.top,
+    SetWindowPos(gMain, nullptr, 0, 0, adj.right - adj.left, adj.bottom - adj.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
 
-    gTitleBar = (GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION) != 0;
+// Estado efetivo da moldura: a transparência (janela em camadas) não desenha
+// a moldura do sistema, então nesse modo a janela fica sempre sem barra.
+static bool FrameEffective() { return gTitleBar && gBgTrans == 0; }
+
+// Define a transparência do fundo (0..100) e ajusta o modo camada.
+static void SetBgTrans(int t) {
+    t = std::clamp(t, 0, 100);
+    bool wasLayered = (gBgTrans > 0);
+    gBgTrans = t;
+    bool layered = (t > 0);
+    if (layered != wasLayered) {
+        LONG_PTR ex = GetWindowLongPtr(gMain, GWL_EXSTYLE);
+        ex = layered ? (ex | WS_EX_LAYERED) : (ex & ~WS_EX_LAYERED);
+        SetWindowLongPtr(gMain, GWL_EXSTYLE, ex);
+        ApplyFrameStyle(FrameEffective());
+        SyncOptions();
+    }
+    RequestRepaint();
+}
+
+// Mostra/oculta a barra de título preservando o tamanho da área cliente.
+static void ToggleTitle(HWND) {
+    if (gBgTrans > 0) return;        // transparente ⇒ sempre sem moldura
+    gTitleBar = !(GetWindowLongPtr(gMain, GWL_STYLE) & WS_CAPTION);
+    ApplyFrameStyle(FrameEffective());
     SyncOptions();
     // Alternar a barra de título é uma ação rápida (duplo clique), fora do
     // botão "Salvar": grava na hora para o próximo start respeitar o estado.
@@ -314,7 +357,7 @@ static void ToggleLayout() {
     SetWindowPos(gMain, nullptr, 0, 0, rc.bottom - rc.top, rc.right - rc.left,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     SyncOptions();
-    InvalidateRect(gMain, nullptr, FALSE);
+    RequestRepaint();
 }
 
 static void PickColor(HWND owner) {
@@ -331,7 +374,7 @@ static void PickColor(HWND owner) {
         if (gSwatchBrush) DeleteObject(gSwatchBrush);
         gSwatchBrush = CreateSolidBrush(gLedOn);
         InvalidateRect(GetDlgItem(gOpts, IDC_SWATCH), nullptr, TRUE);
-        InvalidateRect(gMain, nullptr, FALSE);
+        RequestRepaint();
     }
 }
 
@@ -448,11 +491,87 @@ static void DrawAll(HDC hdc, int W, int H) {
 }
 
 // ---------------------------------------------------------------------------
+// Modo camada: transparência só do fundo (LEDs/texto continuam opacos)
+// ---------------------------------------------------------------------------
+static void FreeDib() {
+    if (gDibDC) { DeleteDC(gDibDC); gDibDC = nullptr; }
+    if (gDib)   { DeleteObject(gDib); gDib = nullptr; }
+    gDibBits = nullptr;
+    gDibW = gDibH = 0;
+}
+
+static bool EnsureDib(int W, int H) {
+    if (gDib && gDibW == W && gDibH == H) return true;
+    FreeDib();
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = W;
+    bi.bmiHeader.biHeight      = -H;          // top-down
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC screen = GetDC(nullptr);
+    gDib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &gDibBits, nullptr, 0);
+    gDibDC = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (!gDib || !gDibDC || !gDibBits) { FreeDib(); return false; }
+    SelectObject(gDibDC, gDib);
+    gDibW = W;
+    gDibH = H;
+    return true;
+}
+
+// Desenha no buffer 32bpp, converte o fundo (COL_BG) para a transparência
+// pedida e mantém LEDs/texto opacos; entrega via UpdateLayeredWindow.
+static void RenderLayered() {
+    if (!gMain || gBgTrans <= 0) return;
+    RECT rc;
+    GetClientRect(gMain, &rc);
+    int W = rc.right, H = rc.bottom;
+    if (W <= 0 || H <= 0) return;
+    if (!EnsureDib(W, H)) return;
+    DrawAll(gDibDC, W, H);
+    // GDI pode estar com as operações em buffer: sem o flush, o loop abaixo
+    // leria lixo e o flush posterior sobrescreveria os alphas.
+    GdiFlush();
+
+    // Alpha mínimo 1: pixel com alpha 0 vira "click-through" e a janela não
+    // poderia mais ser arrastada pelo fundo.
+    BYTE aBg = (BYTE)std::clamp(255 * (100 - gBgTrans) / 100, 1, 255);
+    DWORD* p = (DWORD*)gDibBits;
+    int n = W * H;
+    for (int i = 0; i < n; ++i) {
+        if ((p[i] & 0x00FFFFFFu) == 0) p[i] = (DWORD)aBg << 24;  // fundo (preto)
+        else                           p[i] |= 0xFF000000u;       // conteúdo
+    }
+
+    HDC screen = GetDC(nullptr);
+    POINT src = { 0, 0 };
+    RECT wr;
+    GetWindowRect(gMain, &wr);
+    POINT dst = { wr.left, wr.top };
+    SIZE  sz  = { W, H };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(gMain, screen, &dst, &sz, gDibDC, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(nullptr, screen);
+}
+
+// Repinta pelo caminho certo: camada (imediato) ou GDI normal (via WM_PAINT).
+static void RequestRepaint() {
+    if (!gMain) return;
+    if (gBgTrans > 0) RenderLayered();
+    else              InvalidateRect(gMain, nullptr, FALSE);
+}
+
+// ---------------------------------------------------------------------------
 // Janela "Opções..."
 // ---------------------------------------------------------------------------
 static void SyncOptions() {
     if (!gOpts) return;
-    CheckDlgButton(gOpts, IDC_CHK_TITLE, gTitleBar ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(gOpts, IDC_CHK_TITLE,
+                   FrameEffective() ? BST_CHECKED : BST_UNCHECKED);
+    // Com transparência ativa a janela é em camadas (sem moldura do sistema).
+    EnableWindow(GetDlgItem(gOpts, IDC_CHK_TITLE), gBgTrans == 0);
     CheckDlgButton(gOpts, IDC_CHK_VERT,  gLayout == 1 ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(gOpts, IDC_CHK_PEAK,  gShowPeak ? BST_CHECKED : BST_UNCHECKED);
     CheckRadioButton(gOpts, IDC_RAD_SIMPLE, IDC_RAD_SCHEME,
@@ -461,6 +580,10 @@ static void SyncOptions() {
                    (gLayout == 1) ? L"Alternar para Horizontal"
                                   : L"Alternar para Vertical");
     EnableWindow(GetDlgItem(gOpts, IDC_BTN_COLOR), gScheme == 0);
+    SendMessageW(GetDlgItem(gOpts, IDC_SLIDER_TRANS), TBM_SETPOS, TRUE, gBgTrans);
+    wchar_t b[16];
+    swprintf(b, 16, L"%d%%", gBgTrans);
+    SetWindowTextW(GetDlgItem(gOpts, IDC_LBL_TRANS), b);
 }
 
 static void CreateOptionsControls(HWND h) {
@@ -494,6 +617,19 @@ static void CreateOptionsControls(HWND h) {
        12, 200, 90, 26, IDC_BTN_SAVE);
     mk(L"BUTTON", L"Fechar", BS_PUSHBUTTON,
        112, 200, 90, 26, IDC_BTN_CLOSE);
+
+    // Transparência do fundo: slider vertical 0..100 (incremento 1).
+    mk(L"STATIC", L"Transparência\ndo fundo (%)", SS_LEFT,
+       344, 12, 118, 34, 0);
+    HWND sl = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
+                              WS_CHILD | WS_VISIBLE | TBS_VERT | TBS_AUTOTICKS,
+                              352, 50, 40, 140, h,
+                              (HMENU)(INT_PTR)IDC_SLIDER_TRANS, gHInst, nullptr);
+    SendMessageW(sl, WM_SETFONT, (WPARAM)f, TRUE);
+    SendMessageW(sl, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(sl, TBM_SETTICFREQ, 10, 0);
+    SendMessageW(sl, TBM_SETPOS, TRUE, gBgTrans);
+    mk(L"STATIC", L"0%", SS_LEFT, 400, 54, 62, 18, IDC_LBL_TRANS);
     SyncOptions();
 }
 
@@ -545,13 +681,13 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
             case IDC_CHK_PEAK:
                 gShowPeak = (IsDlgButtonChecked(h, IDC_CHK_PEAK) == BST_CHECKED);
                 if (!gShowPeak) gPeakL = gPeakR = 0.0f;  // limpa a marca
-                InvalidateRect(gMain, nullptr, FALSE);
+                RequestRepaint();
                 break;
             case IDC_RAD_SIMPLE:
             case IDC_RAD_SCHEME:
                 gScheme = (LOWORD(wParam) == IDC_RAD_SIMPLE) ? 0 : 1;
                 SyncOptions();
-                InvalidateRect(gMain, nullptr, FALSE);
+                RequestRepaint();
                 break;
             case IDC_BTN_COLOR: PickColor(h);       break;
             case IDC_BTN_SAVE:
@@ -563,6 +699,20 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
             }
         }
         return 0;
+
+    // Trackbar sempre manda WM_HSCROLL, mesmo vertical.
+    case WM_HSCROLL: {
+        HWND sl = GetDlgItem(h, IDC_SLIDER_TRANS);
+        if (sl && (HWND)lParam == sl) {
+            int v = (int)SendMessageW(sl, TBM_GETPOS, 0, 0);
+            SetBgTrans(v);
+            wchar_t b[16];
+            swprintf(b, 16, L"%d%%", gBgTrans);
+            SetWindowTextW(GetDlgItem(h, IDC_LBL_TRANS), b);
+            if (LOWORD(wParam) == TB_ENDTRACK) SaveIni();   // persistir ao soltar
+        }
+        return 0;
+    }
 
     case WM_TIMER:
         if (wParam == IDC_SAVE_FEEDBACK) {
@@ -612,7 +762,7 @@ static void ApplyScale(int pct) {
     AdjustWindowRect(&rc, style, FALSE);
     SetWindowPos(gMain, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    InvalidateRect(gMain, nullptr, FALSE);
+    RequestRepaint();
 }
 
 static void ShowContextMenu(HWND owner) {
@@ -654,6 +804,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetTimer(hwnd, IDT_AUDIO, 10, nullptr);  // tick de 10 ms
         return 0;
 
+    case WM_SIZE:
+        // Redimensionou: refaz o buffer do modo camada no novo tamanho.
+        if (gBgTrans > 0) RenderLayered();
+        break;          // segue para o DefWindowProc
+
     case WM_TIMER:
         if (wParam == IDT_AUDIO) {
             float pl, pr;
@@ -682,7 +837,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 gHoldL > 0.0f || gHoldR > 0.0f || peakBusy) {
                 gLastLitL = litL;
                 gLastLitR = litR;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                RequestRepaint();
             }
         }
         return 0;
@@ -698,6 +853,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_PAINT: {
+        if (gBgTrans > 0) {
+            // Janela em camadas: o conteúdo vem de UpdateLayeredWindow.
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);
+            EndPaint(hwnd, &ps);
+            RenderLayered();
+            return 0;
+        }
         // Double buffering: desenha tudo em uma DC memória e copia uma única
         // vez com BitBlt — sem flicker do GDI pintando direto na tela.
         PAINTSTRUCT ps;
@@ -785,6 +948,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DESTROY:
         SaveIni();          // persiste tudo (inclusive toggles fora do "Salvar")
+        FreeDib();
         KillTimer(hwnd, IDT_AUDIO);
         gAudio.Shutdown();
         if (gOpts) DestroyWindow(gOpts);
@@ -796,8 +960,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 // ---------------------------------------------------------------------------
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    // Instância única: se já houver uma rodando, traz a janela dela à frente e sai.
+    gOnce = CreateMutexW(nullptr, FALSE, L"Local\\VULedMeter_SingleInstance");
+    if (gOnce && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND prev = FindWindowW(MAIN_CLASS, nullptr);
+        if (prev) {
+            if (IsIconic(prev)) ShowWindow(prev, SW_RESTORE);
+            SetForegroundWindow(prev);
+        }
+        CloseHandle(gOnce);
+        return 0;
+    }
+
     gHInst = hInst;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
+    InitCommonControlsEx(&icc);        // classe do trackbar (slider)
 
     MakeIniPath();
     LoadIni();
@@ -820,7 +999,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     oc.lpszClassName = OPT_CLASS;
     RegisterClassEx(&oc);
 
-    DWORD style = gTitleBar ? WS_OVERLAPPEDWINDOW : WS_POPUP;
+    // Transparência > 0 ⇒ janela em camadas (sem moldura do sistema).
+    bool layered = (gBgTrans > 0);
+    DWORD style   = (layered || !gTitleBar) ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    DWORD exStyle = layered ? WS_EX_LAYERED : 0;
     RECT rc = { 0, 0, DEFAULT_W, DEFAULT_H };
     AdjustWindowRect(&rc, style, FALSE);
     int w = gHasWH ? gIniW : rc.right - rc.left;
@@ -828,10 +1010,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     int x = gHasXY ? gIniX : CW_USEDEFAULT;
     int y = gHasXY ? gIniY : CW_USEDEFAULT;
 
-    gMain = CreateWindowExW(0, MAIN_CLASS, L"VU — Saída Padrão", style,
+    gMain = CreateWindowExW(exStyle, MAIN_CLASS, L"VU — Saída Padrão", style,
                             x, y, w, h, nullptr, nullptr, hInst, nullptr);
     if (!gMain) { CoUninitialize(); return 1; }
     ShowWindow(gMain, nCmdShow);
+    if (layered) RenderLayered();
     UpdateWindow(gMain);
 
     // W/H no ini já reflete a escala escolhida (ApplyScale redimensiona e o
