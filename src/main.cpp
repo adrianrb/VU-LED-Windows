@@ -2,14 +2,15 @@
 // Depende apenas de Win32/GDI/WASAPI/ComDlg. Compilável com MSVC ou MinGW-w64.
 //
 // Interação:
-//  - Clique direito → menu: "Opções...", "Tamanho:" (escala 25%..400%) e
-//    "Sobre...".
+//  - Clique direito → menu: "Opções...", "Tamanho:" (escala 25%..400%),
+//    "Sobre..." e "Sair\tAlt+F4".
 //  - Duplo clique em qualquer lugar da janela → mostra/oculta barra de título.
 //  - Janela redimensionável; sem barra de título, arrastar pelo cliente move.
 //  - Opções: título on/off, Horizontal/Vertical (troca W↔H), linha de pico,
+//    "Sempre visível" (topmost), "Iniciar com o Windows" (HKCU\...\Run),
 //    esquema de cores (simples ou verde/amarelo/vermelho), cor do LED
-//    (ChooseColor) e "Salvar" → grava X,Y,W,H,cor,estilo em VULed.ini (ao lado
-//    do .exe). Linha de pico e esquema NÃO são persistidos (escopo do Save).
+//    (ChooseColor), transparência do fundo e "Salvar" → grava tudo em
+//    VULed.ini (ao lado do .exe).
 //
 // Áudio: a cada 10 ms drena o buffer de loopback do dispositivo de render
 // padrão e calcula o pico por canal. Loopback só entrega dados quando há
@@ -29,6 +30,7 @@
 #include <cstdint>
 #include <cwchar>
 #include <string>
+#include "resource.h"   // IDI_APP (ícone embutido via app.rc)
 
 // ksmedia.h do MinGW-w64 não fornece a definição deste GUID; definimos manualmente.
 static const GUID GUID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = {
@@ -57,6 +59,8 @@ enum {
     IDC_CHK_TITLE = 200,
     IDC_CHK_VERT,
     IDC_CHK_PEAK,
+    IDC_CHK_TOPMOST,
+    IDC_CHK_STARTUP,
     IDC_RAD_SIMPLE,
     IDC_RAD_SCHEME,
     IDC_BTN_COLOR,
@@ -77,7 +81,7 @@ static const float PEAK_FALL = 0.97f;    // queda do pico após o hold
 
 static const wchar_t* MAIN_CLASS = L"VULedMeter";
 static const wchar_t* OPT_CLASS  = L"VUOptions";
-static const int OPT_CW = 470, OPT_CH = 240;
+static const int OPT_CW = 470, OPT_CH = 292;
 
 // ---------------------------------------------------------------------------
 // Captura WASAPI loopback do dispositivo de render padrão
@@ -193,6 +197,8 @@ static COLORREF gLedOn = RGB(0, 230, 255);
 static bool   gShowPeak = false;         // linha de pico visível
 static int    gScheme = 0;               // 0 = simples, 1 = verde/amarelo/vermelho
 static int    gBgTrans = 0;              // 0..100 = % de transparência do fundo
+static bool   gTopmost = true;           // janela sempre visível (topmost)
+static bool   gStartup = false;          // iniciar com o Windows (HKCU\...\Run)
 static float  gPeakL = 0.0f, gPeakR = 0.0f;    // pico com hold
 static int    gPeakHoldL = 0, gPeakHoldR = 0;
 static HBRUSH  gSwatchBrush = nullptr;
@@ -263,6 +269,11 @@ static void LoadIni() {
                                        gIniPath.c_str()) != 0) ? 1 : 0;
     int tr = GetPrivateProfileIntW(L"VU", L"Trans", 0, gIniPath.c_str());
     gBgTrans = std::clamp(tr, 0, 100);
+    // "Sempre visível" ligado por padrão; "Iniciar com o Windows" desligado.
+    gTopmost = (GetPrivateProfileIntW(L"VU", L"Topmost", 1,
+                                      gIniPath.c_str()) != 0);
+    gStartup = (GetPrivateProfileIntW(L"VU", L"Startup", 0,
+                                      gIniPath.c_str()) != 0);
     int sc = GetPrivateProfileIntW(L"VU", L"Scale", 100, gIniPath.c_str());
     if (sc >= 25 && sc <= 400) { gHasScale = true; gIniScale = sc; }
 }
@@ -289,6 +300,33 @@ static void SaveIni() {
     wr(L"Scheme", gScheme);
     wr(L"Scale", CurrentScalePct());
     wr(L"Trans", gBgTrans);
+    wr(L"Topmost", gTopmost ? 1 : 0);
+    wr(L"Startup", gStartup ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------------
+// "Iniciar com o Windows": valor em HKCU\...\Run apontando para este .exe.
+// O ini é a fonte da verdade do checkbox; a chave é só o efeito colateral.
+// ---------------------------------------------------------------------------
+static const wchar_t* RUN_KEY   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const wchar_t* RUN_VALUE = L"VULedMeter";
+
+static void SetStartup(bool on) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS)
+        return;
+    if (on) {
+        // Aspas: o caminho pode ter espaços (o Run executa a linha de comando).
+        wchar_t exe[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring cmd = L"\"" + std::wstring(exe) + L"\"";
+        RegSetValueExW(k, RUN_VALUE, 0, REG_SZ, (const BYTE*)cmd.c_str(),
+                       (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(k, RUN_VALUE);
+    }
+    RegCloseKey(k);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +360,13 @@ static void ApplyFrameStyle(bool frame) {
 // Estado efetivo da moldura: a transparência (janela em camadas) não desenha
 // a moldura do sistema, então nesse modo a janela fica sempre sem barra.
 static bool FrameEffective() { return gTitleBar && gBgTrans == 0; }
+
+// "Sempre visível": mantém a janela acima das demais (ou devolve ao normal).
+static void ApplyTopmost() {
+    if (!gMain) return;
+    SetWindowPos(gMain, gTopmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 // Define a transparência do fundo (0..100) e ajusta o modo camada.
 static void SetBgTrans(int t) {
@@ -582,6 +627,8 @@ static void SyncOptions() {
     EnableWindow(GetDlgItem(gOpts, IDC_CHK_TITLE), gBgTrans == 0);
     CheckDlgButton(gOpts, IDC_CHK_VERT,  gLayout == 1 ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(gOpts, IDC_CHK_PEAK,  gShowPeak ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(gOpts, IDC_CHK_TOPMOST, gTopmost ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(gOpts, IDC_CHK_STARTUP, gStartup ? BST_CHECKED : BST_UNCHECKED);
     CheckRadioButton(gOpts, IDC_RAD_SIMPLE, IDC_RAD_SCHEME,
                      (gScheme == 0) ? IDC_RAD_SIMPLE : IDC_RAD_SCHEME);
     SetWindowTextW(GetDlgItem(gOpts, IDC_CHK_VERT),
@@ -590,8 +637,8 @@ static void SyncOptions() {
     EnableWindow(GetDlgItem(gOpts, IDC_BTN_COLOR), gScheme == 0);
     SendMessageW(GetDlgItem(gOpts, IDC_SLIDER_TRANS), TBM_SETPOS, TRUE,
                  TransToSlider(gBgTrans));
-    wchar_t b[16];
-    swprintf(b, 16, L"%d%%", gBgTrans);
+    wchar_t b[32];
+    swprintf(b, 32, L"Atual: %d%%", gBgTrans);
     SetWindowTextW(GetDlgItem(gOpts, IDC_LBL_TRANS), b);
 }
 
@@ -611,34 +658,41 @@ static void CreateOptionsControls(HWND h) {
        12, 40, 320, 18, IDC_CHK_VERT);
     mk(L"BUTTON", L"Exibir linha de pico", BS_AUTOCHECKBOX,
        12, 66, 320, 18, IDC_CHK_PEAK);
+    mk(L"BUTTON", L"Sempre visível", BS_AUTOCHECKBOX,
+       12, 92, 320, 18, IDC_CHK_TOPMOST);
+    mk(L"BUTTON", L"Iniciar com o Windows", BS_AUTOCHECKBOX,
+       12, 118, 320, 18, IDC_CHK_STARTUP);
     mk(L"STATIC", L"Esquema de cores:", SS_LEFT,
-       12, 94, 180, 16, 0);
+       12, 148, 180, 16, 0);
     mk(L"BUTTON", L"Simples (atual)", BS_AUTORADIOBUTTON | WS_GROUP,
-       24, 112, 300, 18, IDC_RAD_SIMPLE);
+       24, 166, 300, 18, IDC_RAD_SIMPLE);
     mk(L"BUTTON", L"Verde (0) | Amarelo (70%) | Vermelho (85%)",
        BS_AUTORADIOBUTTON,
-       24, 132, 310, 18, IDC_RAD_SCHEME);
+       24, 186, 310, 18, IDC_RAD_SCHEME);
     mk(L"BUTTON", L"Escolher cor do LED...", BS_PUSHBUTTON,
-       12, 162, 170, 26, IDC_BTN_COLOR);
+       12, 216, 170, 26, IDC_BTN_COLOR);
     mk(L"STATIC", L"", WS_BORDER | SS_NOTIFY,
-       192, 162, 56, 26, IDC_SWATCH);
+       192, 216, 56, 26, IDC_SWATCH);
     mk(L"BUTTON", L"Salvar", BS_PUSHBUTTON,
-       12, 200, 90, 26, IDC_BTN_SAVE);
+       12, 254, 90, 26, IDC_BTN_SAVE);
     mk(L"BUTTON", L"Fechar", BS_PUSHBUTTON,
-       112, 200, 90, 26, IDC_BTN_CLOSE);
+       112, 254, 90, 26, IDC_BTN_CLOSE);
 
     // Transparência do fundo: slider vertical 0..100 (incremento 1).
+    // O valor é invertido (0% embaixo), então as dicas acompanham o eixo.
     mk(L"STATIC", L"Transparência\ndo fundo (%)", SS_LEFT,
        344, 12, 118, 34, 0);
+    mk(L"STATIC", L"100%", SS_LEFT, 398, 50, 56, 16, 0);
     HWND sl = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
                               WS_CHILD | WS_VISIBLE | TBS_VERT | TBS_AUTOTICKS,
-                              352, 50, 40, 140, h,
+                              352, 68, 40, 164, h,
                               (HMENU)(INT_PTR)IDC_SLIDER_TRANS, gHInst, nullptr);
     SendMessageW(sl, WM_SETFONT, (WPARAM)f, TRUE);
     SendMessageW(sl, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
     SendMessageW(sl, TBM_SETTICFREQ, 10, 0);
     SendMessageW(sl, TBM_SETPOS, TRUE, TransToSlider(gBgTrans));
-    mk(L"STATIC", L"0%", SS_LEFT, 400, 54, 62, 18, IDC_LBL_TRANS);
+    mk(L"STATIC", L"0%", SS_LEFT, 398, 216, 56, 16, 0);
+    mk(L"STATIC", L"Atual: 0%", SS_CENTER, 344, 242, 118, 18, IDC_LBL_TRANS);
     SyncOptions();
 }
 
@@ -692,6 +746,15 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
                 if (!gShowPeak) gPeakL = gPeakR = 0.0f;  // limpa a marca
                 RequestRepaint();
                 break;
+            case IDC_CHK_TOPMOST:
+                gTopmost = (IsDlgButtonChecked(h, IDC_CHK_TOPMOST) == BST_CHECKED);
+                ApplyTopmost();
+                break;
+            case IDC_CHK_STARTUP:
+                gStartup = (IsDlgButtonChecked(h, IDC_CHK_STARTUP) == BST_CHECKED);
+                SetStartup(gStartup);
+                SaveIni();      // efeito externo (registro): grava o estado já
+                break;
             case IDC_RAD_SIMPLE:
             case IDC_RAD_SCHEME:
                 gScheme = (LOWORD(wParam) == IDC_RAD_SIMPLE) ? 0 : 1;
@@ -717,8 +780,8 @@ static LRESULT CALLBACK OptionsProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPar
         if (sl && (HWND)lParam == sl) {
             int v = SliderToTrans((int)SendMessageW(sl, TBM_GETPOS, 0, 0));
             SetBgTrans(v);   // aplica na hora: o VU acompanha o arrasto
-            wchar_t b[16];
-            swprintf(b, 16, L"%d%%", gBgTrans);
+            wchar_t b[32];
+            swprintf(b, 32, L"Atual: %d%%", gBgTrans);
             SetWindowTextW(GetDlgItem(h, IDC_LBL_TRANS), b);
             if (LOWORD(wParam) == TB_ENDTRACK) SaveIni();   // persistir ao soltar
         }
@@ -996,7 +1059,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     MakeIniPath();
     LoadIni();
+    // Se o .exe foi movido/renomeado, reescreve o caminho do autostart.
+    if (gStartup) SetStartup(true);
     gSwatchBrush = CreateSolidBrush(gLedOn);
+
+    // Ícone embutido (app.rc): usado na janela, na barra de tarefas e no Alt+Tab.
+    HICON hIconBig = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXICON),
+                                       GetSystemMetrics(SM_CYICON), 0);
+    HICON hIconSm  = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXSMICON),
+                                       GetSystemMetrics(SM_CYSMICON), 0);
 
     WNDCLASSEX wc = { sizeof(wc) };
     wc.style         = CS_DBLCLKS;           // habilita WM_LBUTTONDBLCLK
@@ -1005,6 +1078,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = MAIN_CLASS;
+    wc.hIcon         = hIconBig;
+    wc.hIconSm       = hIconSm;
     RegisterClassEx(&wc);
 
     WNDCLASSEX oc = { sizeof(oc) };
@@ -1013,6 +1088,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     oc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     oc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     oc.lpszClassName = OPT_CLASS;
+    oc.hIcon         = hIconBig;
+    oc.hIconSm       = hIconSm;
     RegisterClassEx(&oc);
 
     // Transparência > 0 ⇒ janela em camadas (sem moldura do sistema).
@@ -1029,6 +1106,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     gMain = CreateWindowExW(exStyle, MAIN_CLASS, L"VU — Saída Padrão", style,
                             x, y, w, h, nullptr, nullptr, hInst, nullptr);
     if (!gMain) { CoUninitialize(); return 1; }
+    ApplyTopmost();                      // "Sempre visível" (padrão: ligado)
     ShowWindow(gMain, nCmdShow);
     if (layered) RenderLayered();
     UpdateWindow(gMain);
@@ -1054,6 +1132,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     }
     if (gAccel) DestroyAcceleratorTable(gAccel);
     if (gSwatchBrush) DeleteObject(gSwatchBrush);
+    if (hIconSm)  DestroyIcon(hIconSm);
+    if (hIconBig) DestroyIcon(hIconBig);
     CoUninitialize();
     return (int)msg.wParam;
 }

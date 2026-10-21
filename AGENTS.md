@@ -6,6 +6,10 @@ loopback. C++ puro (Win32 + GDI), zero dependências externas.
 ## Código
 
 - `src/main.cpp` — app inteiro (janela + captura WASAPI + desenho dos LEDs)
+- `src/app.rc` + `src/app.ico` + `src/resource.h` — ícone embutido no `.exe`
+  (`IDI_APP`, 16/24/32/48/64/128 px; gerado dos PNGs `icon32x32.png` /
+  `icon128x128.png` na raiz). O Explorer/taskbar leem o **recurso** ICON, não o
+  `.ico`, por isso o `app.rc` é compilado com `windres` e linkado junto.
 - `output/VULed.exe` — binário compilado (cross-compile a partir do WSL)
 - `output/VULed.ini` — preferências persistidas; fica ao lado do `.exe` porque
   é ali que o app lê/grava (`MakeIniPath` usa `GetModuleFileNameW`)
@@ -14,17 +18,19 @@ loopback. C++ puro (Win32 + GDI), zero dependências externas.
 ## Build (MinGW-w64 a partir do WSL)
 
 ```sh
-make          # compila src/main.cpp -> output/VULed.exe (objeto em build/)
+make          # compila src/main.cpp + src/app.rc -> output/VULed.exe
 make clean    # apaga só os temporários (build/), preserva output/
 ```
 
-Sem `make` (duas etapas, para os temporários irem para `build/`):
+Sem `make` (três etapas, para os temporários irem para `build/`):
 
 ```sh
 x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -municode -mwindows \
   -c src/main.cpp -o build/main.o
+x86_64-w64-mingw32-windres -I src -O coff -o build/app.res src/app.rc
 x86_64-w64-mingw32-g++ -static -municode -mwindows -o output/VULed.exe \
-  build/main.o -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32
+  build/main.o build/app.res \
+  -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -ladvapi32
 ```
 
 `-static` é **obrigatório**: sem ele o `.exe` depende de `libstdc++-6.dll` /
@@ -34,7 +40,7 @@ derrubam a execução com "libstdc++-6.dll não foi encontrado". Validar com:
 ```sh
 x86_64-w64-mingw32-objdump -p output/VULed.exe | grep "DLL Name"
 # deve listar só DLLs de sistema (GDI32, USER32, ole32, comdlg32, comctl32,
-# KERNEL32, msvcrt)
+# ADVAPI32, KERNEL32, msvcrt)
 ```
 
 Requisitos: `sudo apt install g++-mingw-w64-x86-64`. Não há testes/CI — a
@@ -130,6 +136,17 @@ verificação é compilar e rodar o `.exe` no Windows.
   ficam opacos. Implementado com `UpdateLayeredWindow` sobre um DIB 32bpp
   (premultiplied) — quando `Trans > 0` a janela fica sem moldura (ver
   armadilhas). Com `Trans = 0` o caminho é o GDI normal com double buffering.
+- **Sempre visível** (`gTopmost`, chave `Topmost`, padrão **1**): checkbox na
+  janela Opções; `ApplyTopmost()` faz
+  `SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST)` e é reaplicado no start (depois do
+  `CreateWindow`). A janela Opções **não** é topmost — ela abre abaixo do VU,
+  então não fica escondida atrás dele.
+- **Iniciar com o Windows** (`gStartup`, chave `Startup`, padrão **0**): grava
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, valor `VULedMeter`, com
+  o caminho do `.exe` entre aspas (pode ter espaços). O ini é a fonte da verdade
+  do checkbox; marcar/desmarcar cria/remove a chave na hora e chama `SaveIni()`
+  junto (o efeito é fora do processo). No start, se `Startup=1`, o caminho é
+  reescrito — conserta o autostart quando o `.exe` é movido.
 - **Instância única**: mutex nomeado `Local\VULedMeter_SingleInstance` criado
   no início do `wWinMain`; se já existir, a segunda instância traz a janela da
   primeira para frente (`ShowWindow(SW_RESTORE)` + `SetForegroundWindow`) e
@@ -140,9 +157,11 @@ verificação é compilar e rodar o `.exe` no Windows.
   `output/VULed.ini`, chaves em `[VU]`):
   tudo que a janela Opções expõe + o menu Tamanho — `X,Y,W,H`, `Color`
   (COLORREF decimal), `Style` (`H`/`V`), `Title` (0/1), `Peak` (0/1),
-  `Scheme` (0/1), `Trans` (0..100) e `Scale` (25..400). Além do botão `Salvar`,
+  `Scheme` (0/1), `Trans` (0..100), `Topmost` (0/1), `Startup` (0/1) e
+  `Scale` (25..400). Além do botão `Salvar`,
   o estado é gravado **automaticamente** em `WM_DESTROY` (sair), em
-  `ToggleTitle` e ao soltar o slider de transparência (`TB_ENDTRACK`) — o
+  `ToggleTitle`, ao soltar o slider de transparência (`TB_ENDTRACK`) e ao
+  marcar/desmarcar "Iniciar com o Windows" — o
   duplo clique alterna a barra de título fora do `Salvar`, então sem esse
   save imediato o app reiniciava sempre com título. Único estado **não** salvo:
   cores customizadas da paleta do picker (16 slots do `CHOOSECOLOR`).

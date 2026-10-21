@@ -1,0 +1,5 @@
+// Ícone do executável (Explorer, barra de título, Alt+Tab).
+// app.ico traz 16, 24, 32, 48, 64 e 128 px.
+#include "resource.h"
+
+IDI_APP ICON "app.ico"
