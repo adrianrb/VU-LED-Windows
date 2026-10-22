@@ -123,9 +123,12 @@ verificação é compilar e rodar o `.exe` no Windows.
   **substitui a janela inteira**: a moldura/barra de título do sistema deixa de
   ser desenhada. Por isso, com transparência ativa a janela é sempre `WS_POPUP`
   e o checkbox "Exibir barra de título" fica desabilitado (a preferência
-  `Title` é preservada e volta a valer quando `Trans` volta a 0, e
-  `ToggleTitle` ignora o duplo clique nesse estado). Não tentar "consertar"
-  mantendo `WS_OVERLAPPEDWINDOW`: o `UpdateLayeredWindow` cobre a moldura e
+  `Title` é preservada e volta a valer quando `Trans` volta a 0).
+  O duplo clique **não** é ignorado nesse estado: como moldura e camada não
+  coexistem, `ToggleTitle` desliga a transparência (`SetBgTrans(0)`) para poder
+  mostrar a barra de título — sem isso a janela ficava travada sem moldura e
+  sem jeito de reverter pelo cliente. Não tentar "consertar" mantendo
+  `WS_OVERLAPPEDWINDOW` com a camada: o `UpdateLayeredWindow` cobre a moldura e
   sobra lixo visual.
 - **`GdiFlush()` antes de ler/escrever os pixels do DIB** em `RenderLayered`:
   o GDI mantém as operações em buffer; sem o flush o loop de alpha lê lixo e o
@@ -183,6 +186,13 @@ verificação é compilar e rodar o `.exe` no Windows.
   também thickframe/sysmenu (vira `WS_POPUP` puro). Sem título, arrastar pela
   área cliente move a janela (drag manual com `SetCapture`, não usar
   `WM_NCLBUTTONDOWN/HTCAPTION` — conflitaria com o duplo clique).
+  O arrasto é habilitado pelo **estilo real** (`!(GetWindowLongPtr(GWL_STYLE) &
+  WS_CAPTION)`), não por `gTitleBar`: com transparência a janela fica sem
+  moldura mesmo com `Title=1`, e checar a preferência deixava a janela
+  impossível de mover nesse estado.
+  Com moldura o Windows impõe uma largura mínima (`SM_CXMIN`, 136 px em 100%):
+  ligar a barra de título numa janela vertical de 75 px alarga o cliente para
+  ~120 px — é limitação do sistema, não do app.
 - **Transparência do fundo** (`gBgTrans`, 0..100, chave `Trans`, padrão 0):
   slider vertical na janela Opções (`TBS_VERT`, incremento 1, **0% embaixo e
   100% no topo**). O trackbar é linear com o mínimo no topo, então o valor é

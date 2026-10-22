@@ -80,8 +80,13 @@ void SetBgTrans(int t) {
 
 // Mostra/oculta a barra de título preservando o tamanho da área cliente.
 void ToggleTitle(HWND) {
-    if (gBgTrans > 0) return;        // transparente ⇒ sempre sem moldura
-    gTitleBar = !(GetWindowLongPtr(gMain, GWL_STYLE) & WS_CAPTION);
+    bool wantFrame = !FrameEffective();   // sem moldura efetiva ⇒ ligar
+    // Moldura do sistema e janela em camadas não coexistem (o
+    // UpdateLayeredWindow substitui a janela inteira e a moldura não aparece).
+    // Pedir a barra de título com transparência ativa desliga a transparência;
+    // o usuário pode religá-la no slider da janela Opções.
+    if (wantFrame && gBgTrans > 0) SetBgTrans(0);
+    gTitleBar = wantFrame;
     ApplyFrameStyle(FrameEffective());
     SyncOptions();
     // Alternar a barra de título é uma ação rápida (duplo clique), fora do
@@ -284,8 +289,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     // Sem barra de título: arrastar pela área cliente move a janela.
+    // A checagem é pelo estilo real (e não por `gTitleBar`): com transparência a
+    // janela fica sem moldura mesmo com `Title=1`, e nesse estado ela também
+    // precisa poder ser arrastada.
     case WM_LBUTTONDOWN:
-        if (!gTitleBar) {
+        if (!(GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION)) {
             gDragging = true;
             GetCursorPos(&gDragStart);
             GetWindowRect(hwnd, &gDragRect);
