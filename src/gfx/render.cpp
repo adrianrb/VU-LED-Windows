@@ -1,4 +1,4 @@
-// Desenho do VU: LEDs, rótulos L/R e linha de pico — em GDI puro, para uma
+// Desenho do VU: LEDs (incl. o LED do pico), rótulos L/R — em GDI puro, para uma
 // DC de memória (double buffering) ou para o DIB 32bpp do modo camada.
 #include "gfx/render.h"
 
@@ -28,18 +28,18 @@ int LevelToLitCount(float level) {
     return (int)std::lround(t * LED_COUNT);
 }
 
-// Posição normalizada (0..1) do nível na escala — usada p/ a linha de pico.
+// Posição normalizada (0..1) do nível na escala — usada p/ o LED do pico.
 static float LevelToPos(float level) {
     if (level <= 1e-5f) return 0.0f;
     float db = 20.0f * std::log10(level);
     return std::clamp((db - DB_MIN) / (0.0f - DB_MIN), 0.0f, 1.0f);
 }
 
-// Vão (1..LED_COUNT) onde a marca de pico é desenhada; 0 = sem pico.
-// A marca fica no vão logo depois/acima do LED correspondente — assim ela
-// encosta no topo da barra e **não** cobre nenhum LED (antes caía em cima de
-// um segmento e parecia um LED branco aceso no meio do VU).
-static int PeakGapIndex(float level) {
+// Quantidade de LEDs que o pico acende (0..LED_COUNT); 0 = sem pico.
+// O pico é o LED da posição do pico, aceso na cor daquela posição (hold do
+// Winamp) — **não** um traço branco. Ele fica aceso mesmo com a barra abaixo
+// e desce junto com o decaimento (`PEAK_HOLD_TICKS`/`PEAK_FALL`).
+static int PeakLitCount(float level) {
     if (level <= 1e-5f) return 0;
     return std::clamp((int)std::lround(LevelToPos(level) * LED_COUNT), 1, LED_COUNT);
 }
@@ -79,7 +79,7 @@ void DrawAll(HDC hdc, int W, int H) {
     SetTextColor(hdc, RGB(170, 170, 170));
 
     int lit[2] = { LevelToLitCount(gHoldL), LevelToLitCount(gHoldR) };
-    int peakIdx[2] = { PeakGapIndex(gPeakL), PeakGapIndex(gPeakR) };
+    int peakLit[2] = { PeakLitCount(gPeakL), PeakLitCount(gPeakR) };
 
     if (gLayout == 0) {
         // Horizontal: barras empilhadas (L em cima, R embaixo), crescem p/ direita.
@@ -93,20 +93,12 @@ void DrawAll(HDC hdc, int W, int H) {
             for (int i = 0; i < LED_COUNT; ++i) {
                 int x = areaX + i * (segW + LED_GAP);
                 COLORREF on = LedColor(i);
-                DrawLed(hdc, x, y, segW, rowH, (i < lit[ch]) ? on
+                // Pico: acende o LED da posição do pico mesmo com a barra abaixo.
+                bool peakLed = gShowPeak && (i == peakLit[ch] - 1);
+                DrawLed(hdc, x, y, segW, rowH, (i < lit[ch] || peakLed) ? on
                         : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
             TextOut(hdc, 3, y + rowH / 2 - 6, (ch == 0) ? L"L" : L"R", 1);
-            // Marca de pico: traço vertical branco no vão entre LEDs,
-            // atravessando a barra e sobressaindo 2px em cima e embaixo.
-            if (gShowPeak && peakIdx[ch] > 0) {
-                int x = areaX + (peakIdx[ch] - 1) * (segW + LED_GAP) + segW;
-                x = std::clamp(x, areaX, std::max(areaX, W - 2));
-                RECT pk = { x, y - 2, x + 2, y + rowH + 2 };
-                HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
-                FillRect(hdc, &pk, b);
-                DeleteObject(b);
-            }
         }
     } else {
         // Vertical: colunas lado a lado (L esq., R dir.), crescem de baixo p/ cima.
@@ -120,21 +112,13 @@ void DrawAll(HDC hdc, int W, int H) {
             for (int i = 0; i < LED_COUNT; ++i) {
                 int y = yBottom - (i + 1) * segH - i * LED_GAP;
                 COLORREF on = LedColor(i);
-                DrawLed(hdc, x, y, colW, segH, (i < lit[ch]) ? on
+                // Pico: acende o LED da posição do pico mesmo com a barra abaixo.
+                bool peakLed = gShowPeak && (i == peakLit[ch] - 1);
+                DrawLed(hdc, x, y, colW, segH, (i < lit[ch] || peakLed) ? on
                         : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
             TextOut(hdc, x + colW / 2 - 4, H - labelH + 2,
                     (ch == 0) ? L"L" : L"R", 1);
-            // Marca de pico: traço horizontal branco no vão entre LEDs,
-            // atravessando a coluna e sobressaindo 2px de cada lado.
-            if (gShowPeak && peakIdx[ch] > 0) {
-                int y = yBottom - peakIdx[ch] * (segH + LED_GAP);
-                y = std::clamp(y, 0, std::max(0, H - 2));
-                RECT pk = { x - 2, y, x + colW + 2, y + 2 };
-                HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
-                FillRect(hdc, &pk, b);
-                DeleteObject(b);
-            }
         }
     }
     SelectObject(hdc, oldPen);

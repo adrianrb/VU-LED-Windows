@@ -23,6 +23,7 @@ static bool gDragging = false;
 static POINT gDragStart = {};
 static RECT  gDragRect = {};
 static int   gLastLitL = -1, gLastLitR = -1;  // suprime repaint quando ocioso
+static bool  gPeakWasVisible = false;         // p/ apagar o LED do pico no fim
 
 // ---------------------------------------------------------------------------
 // Ações
@@ -169,9 +170,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (gHoldL < 1e-5f) gHoldL = 0.0f;
             if (gHoldR < 1e-5f) gHoldR = 0.0f;
 
-            // Linha de pico: sobe com o nível exibido, segura ~0,7 s e cai.
+            // Pico (hold): sobe com o nível exibido, segura ~0,7 s e cai.
             // Usar o nível suavizado (gHold) em vez do pico cru evita que o
-            // marcador fique grudado no topo: com música comprimida o pico
+            // LED do pico fique grudado no topo: com música comprimida o pico
             // instantâneo bate no teto a cada buffer (~45 ms) e re-arma o hold
             // para sempre. Depois do hold o pico cai e, se alcançar o nível,
             // passa a acompanhá-lo (nunca fica abaixo da barra).
@@ -188,13 +189,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int litR = LevelToLitCount(gHoldR);
             // Sem som (holds zerados) e LEDs já apagados → não repinta.
             // Evita repaint contínuo a 100 Hz quando ocioso (flicker).
-            bool peakBusy = gShowPeak && (gPeakL > 0.0f || gPeakR > 0.0f);
+            bool peakVisible = gShowPeak && (gPeakL > 0.0f || gPeakR > 0.0f);
             if (litL != gLastLitL || litR != gLastLitR ||
-                gHoldL > 0.0f || gHoldR > 0.0f || peakBusy) {
+                gHoldL > 0.0f || gHoldR > 0.0f ||
+                peakVisible || gPeakWasVisible) {
                 gLastLitL = litL;
                 gLastLitR = litR;
                 RequestRepaint();
             }
+            gPeakWasVisible = peakVisible;   // 1 repaint a mais p/ apagar o pico
         }
         return 0;
 

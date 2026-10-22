@@ -86,7 +86,7 @@ static void CreateOptionsControls(HWND h) {
        12, 14, 320, 18, IDC_CHK_TITLE);
     mk(L"BUTTON", L"Alternar para Vertical", BS_AUTOCHECKBOX,
        12, 40, 320, 18, IDC_CHK_VERT);
-    mk(L"BUTTON", L"Exibir linha de pico", BS_AUTOCHECKBOX,
+    mk(L"BUTTON", L"Exibir pico", BS_AUTOCHECKBOX,
        12, 66, 320, 18, IDC_CHK_PEAK);
     mk(L"BUTTON", L"Sempre visível", BS_AUTOCHECKBOX,
        12, 92, 320, 18, IDC_CHK_TOPMOST);

@@ -18,7 +18,7 @@ includes usam sempre o caminho a partir de `src/` (o build passa `-I src`):
 - `src/app/config.{h,cpp}` — `VULed.ini` (load/save) e "Iniciar com o Windows"
   (`HKCU\...\Run`)
 - `src/audio/capture.{h,cpp}` — captura WASAPI loopback (`struct AudioCapture`)
-- `src/gfx/render.{h,cpp}` — desenho dos LEDs/rótulos/linha de pico e o modo
+- `src/gfx/render.{h,cpp}` — desenho dos LEDs/rótulos/LED do pico e o modo
   camada (DIB 32bpp + `UpdateLayeredWindow`)
 - `src/ui/main_window.{h,cpp}` — `WndProc` principal: timer de captura,
   pintura, arrasto e as ações de janela (moldura, topmost, transparência,
@@ -149,18 +149,18 @@ verificação é compilar e rodar o `.exe` no Windows.
   uma variável — o menu marca a entrada mais próxima. O mínimo de
   `WM_GETMINMAXINFO` é dinâmico (25% + moldura) para não bloquear presets
   pequenos; clamps do `LoadIni` também são baixos (64x40) por isso.
-- **Linha de pico**: traço branco de 2px **no vão entre LEDs** (índice
-  `PeakGapIndex`, alinhado ao LED do nível), atravessando a barra e
-  sobressaindo 2px de cada lado; o vão existe justamente para a marca não
-  cobrir um segmento — desenhada na posição contínua do pico ela caía em cima
-  de um LED e parecia um LED branco aceso. Hold de ~0,7 s
-  (`PEAK_HOLD_TICKS`) e queda `PEAK_FALL` por tick. Ela é alimentada pelo
+- **Pico (hold)**: é um **LED da própria barra** — o LED da posição do pico
+  (`PeakLitCount`) fica aceso na cor daquela posição, acima da barra, e desce
+  conforme o decaimento. **Não** é traço/marca branca (essa era a versão
+  errada: a "linha" parecia um LED avulso e ainda cobria um segmento). Hold de
+  ~0,7 s (`PEAK_HOLD_TICKS`) e queda `PEAK_FALL` por tick. É alimentado pelo
   **nível exibido** (`gHold`), não pelo pico cru do buffer: com música
   comprimida o pico instantâneo bate no teto a cada buffer (~45 ms) e re-arma o
-  hold para sempre — a marca fica congelada no topo enquanto as barras dançam.
+  hold para sempre — o LED fica congelado no topo enquanto as barras dançam.
   Depois do hold o pico cai e, ao alcançar o nível, passa a acompanhá-lo (nunca
-  fica abaixo da barra). Desligar zera `gPeakL/R` (senão a marca fica
-  congelada).
+  fica abaixo da barra). Desligar zera `gPeakL/R` (senão o LED fica aceso) e o
+  timer guarda `gPeakWasVisible` para garantir o repaint que apaga o LED
+  quando o pico chega a zero com a barra já parada.
 - **Bandeja (tray)**: ícone adicionado em `WM_CREATE` (`Shell_NotifyIconW`
   `NIM_ADD`, callback `WM_TRAYICON = WM_APP+1`) e removido em `WM_DESTROY`.
   Clique esquerdo/direito abre o **mesmo** menu de contexto. O menu da bandeja
@@ -183,7 +183,7 @@ verificação é compilar e rodar o `.exe` no Windows.
   Cada notificação do slider (`WM_VSCROLL`, ver armadilhas) aplica na hora:
   o VU acompanha o arrasto em tempo real, e ao soltar (`TB_ENDTRACK`) grava a
   preferência.
-  Aplica-se **só ao fundo** (`COL_BG` = preto): LEDs, texto e linha de pico
+  Aplica-se **só ao fundo** (`COL_BG` = preto): LEDs, texto e LED do pico
   ficam opacos. Implementado com `UpdateLayeredWindow` sobre um DIB 32bpp
   (premultiplied) — quando `Trans > 0` a janela fica sem moldura (ver
   armadilhas). Com `Trans = 0` o caminho é o GDI normal com double buffering.

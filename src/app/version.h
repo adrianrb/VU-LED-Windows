@@ -3,4 +3,4 @@
 #pragma once
 #include <windows.h>
 
-inline constexpr const wchar_t* APP_VERSION = L"1.6.0";
+inline constexpr const wchar_t* APP_VERSION = L"1.6.1";

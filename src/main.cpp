@@ -6,7 +6,7 @@
 //    "Sobre..." e "Sair\tAlt+F4" (o mesmo menu abre pelo ícone da bandeja).
 //  - Duplo clique em qualquer lugar da janela → mostra/oculta barra de título.
 //  - Janela redimensionável; sem barra de título, arrastar pelo cliente move.
-//  - Opções: título on/off, Horizontal/Vertical (troca W↔H), linha de pico,
+//  - Opções: título on/off, Horizontal/Vertical (troca W↔H), pico (hold),
 //    "Sempre visível" (topmost), "Iniciar com o Windows" (HKCU\...\Run),
 //    esquema de cores (simples ou verde/amarelo/vermelho), cor do LED
 //    (ChooseColor), transparência do fundo e "Salvar" → grava tudo em
