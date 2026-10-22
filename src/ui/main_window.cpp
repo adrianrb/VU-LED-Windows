@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "app/config.h"
 #include "app/ids.h"
 #include "app/state.h"
+#include "app/version.h"
 #include "audio/capture.h"
 #include "gfx/render.h"
 #include "ui/menu.h"
@@ -254,11 +256,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             break;
-        case IDM_ABOUT:
-            MessageBoxW(hwnd,
-                        L"(2026) Copyleft by adrian.barbosa@gmail.com",
-                        L"Sobre...", MB_OK | MB_ICONINFORMATION);
+        case IDM_ABOUT: {
+            std::wstring msg = L"VU — Saída Padrão\nVersão ";
+            msg += APP_VERSION;
+            msg += L"\n\n(2026) Copyleft by adrian.barbosa@gmail.com";
+            MessageBoxW(hwnd, msg.c_str(), L"Sobre...", MB_OK | MB_ICONINFORMATION);
             return 0;
+        }
         case IDM_EXIT:
             DestroyWindow(hwnd);
             return 0;

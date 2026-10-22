@@ -35,6 +35,15 @@ static float LevelToPos(float level) {
     return std::clamp((db - DB_MIN) / (0.0f - DB_MIN), 0.0f, 1.0f);
 }
 
+// Vão (1..LED_COUNT) onde a marca de pico é desenhada; 0 = sem pico.
+// A marca fica no vão logo depois/acima do LED correspondente — assim ela
+// encosta no topo da barra e **não** cobre nenhum LED (antes caía em cima de
+// um segmento e parecia um LED branco aceso no meio do VU).
+static int PeakGapIndex(float level) {
+    if (level <= 1e-5f) return 0;
+    return std::clamp((int)std::lround(LevelToPos(level) * LED_COUNT), 1, LED_COUNT);
+}
+
 // Cor acesa do LED i conforme o esquema:
 //  0 (simples): cor única (gLedOn).
 //  1 (faixas): Verde da posição 0, Amarelo a partir de 70%, Vermelho a 85%.
@@ -70,7 +79,7 @@ void DrawAll(HDC hdc, int W, int H) {
     SetTextColor(hdc, RGB(170, 170, 170));
 
     int lit[2] = { LevelToLitCount(gHoldL), LevelToLitCount(gHoldR) };
-    float ppos[2] = { LevelToPos(gPeakL), LevelToPos(gPeakR) };
+    int peakIdx[2] = { PeakGapIndex(gPeakL), PeakGapIndex(gPeakR) };
 
     if (gLayout == 0) {
         // Horizontal: barras empilhadas (L em cima, R embaixo), crescem p/ direita.
@@ -88,11 +97,12 @@ void DrawAll(HDC hdc, int W, int H) {
                         : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
             TextOut(hdc, 3, y + rowH / 2 - 6, (ch == 0) ? L"L" : L"R", 1);
-            // Linha de pico: marca vertical branca na posição do pico.
-            if (gShowPeak && ppos[ch] > 0.0f) {
-                int x = areaX + (int)std::lround(ppos[ch] * areaW) - 1;
-                x = std::clamp(x, areaX, areaX + areaW - 2);
-                RECT pk = { x, y - 1, x + 2, y + rowH + 1 };
+            // Marca de pico: traço vertical branco no vão entre LEDs,
+            // atravessando a barra e sobressaindo 2px em cima e embaixo.
+            if (gShowPeak && peakIdx[ch] > 0) {
+                int x = areaX + (peakIdx[ch] - 1) * (segW + LED_GAP) + segW;
+                x = std::clamp(x, areaX, std::max(areaX, W - 2));
+                RECT pk = { x, y - 2, x + 2, y + rowH + 2 };
                 HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
                 FillRect(hdc, &pk, b);
                 DeleteObject(b);
@@ -115,11 +125,12 @@ void DrawAll(HDC hdc, int W, int H) {
             }
             TextOut(hdc, x + colW / 2 - 4, H - labelH + 2,
                     (ch == 0) ? L"L" : L"R", 1);
-            // Linha de pico: marca horizontal branca na posição do pico.
-            if (gShowPeak && ppos[ch] > 0.0f) {
-                int y = yBottom - (int)std::lround(ppos[ch] * areaH) - 1;
-                y = std::clamp(y, mt, yBottom - 2);
-                RECT pk = { x - 1, y, x + colW + 1, y + 2 };
+            // Marca de pico: traço horizontal branco no vão entre LEDs,
+            // atravessando a coluna e sobressaindo 2px de cada lado.
+            if (gShowPeak && peakIdx[ch] > 0) {
+                int y = yBottom - peakIdx[ch] * (segH + LED_GAP);
+                y = std::clamp(y, 0, std::max(0, H - 2));
+                RECT pk = { x - 2, y, x + colW + 2, y + 2 };
                 HBRUSH b = CreateSolidBrush(RGB(255, 255, 255));
                 FillRect(hdc, &pk, b);
                 DeleteObject(b);

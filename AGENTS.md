@@ -14,6 +14,7 @@ includes usam sempre o caminho a partir de `src/` (o build passa `-I src`):
   IDs de comando/controle e nomes de classe
 - `src/app/state.{h,cpp}` — estado compartilhado: preferências em memória,
   níveis/picos (`gHold*`, `gPeak*`) e handles `gMain`/`gOpts`
+- `src/app/version.h` — versão exibida no `Sobre...` (`APP_VERSION`)
 - `src/app/config.{h,cpp}` — `VULed.ini` (load/save) e "Iniciar com o Windows"
   (`HKCU\...\Run`)
 - `src/audio/capture.{h,cpp}` — captura WASAPI loopback (`struct AudioCapture`)
@@ -71,7 +72,10 @@ verificação é compilar e rodar o `.exe` no Windows.
 
 ## Versão
 
-- `version.txt` contém a versão em `X.Y.Z` (uma linha, sem `v` prefixo).
+- `version.txt` contém a versão em `X.Y.Z` (uma linha, sem `v` prefixo) e é a
+  fonte da verdade; `src/app/version.h` (`APP_VERSION`) é o que o app compila
+  (texto do `Sobre...`). O `Makefile` (`check-version`) **aborta o build** se
+  os dois divergirem — ao subir a versão, mudar os dois arquivos.
 - Padrão semântico simples: **incrementar Z** (patch) em cada alteração que
   mudar o binário/código; reservar Y para mudanças de comportamento novo
   (ex.: novo item de menu) e X para quebras grandes. Primeira release: 1.0.0.
@@ -134,6 +138,7 @@ verificação é compilar e rodar o `.exe` no Windows.
 - **Menu**: clique direito na janela (ou clique no ícone da bandeja) →
   `Opções...` (janela de configurações),
   `Tamanho:` (submenu de radio: 25%..400%, padrão 100%), `Sobre...` (mostra
+  "VU — Saída Padrão", `Versão X.Y.Z` e
   "(2026) Copyleft by adrian.barbosa@gmail.com"), separador e `Sair\tAlt+F4`.
   `Sair` é `IDM_EXIT` → `DestroyWindow`; o Alt+F4 funciona também sem moldura
   (`WS_POPUP` sem sysmenu) por uma tabela de aceleradores (`hAccel` em
@@ -144,7 +149,11 @@ verificação é compilar e rodar o `.exe` no Windows.
   uma variável — o menu marca a entrada mais próxima. O mínimo de
   `WM_GETMINMAXINFO` é dinâmico (25% + moldura) para não bloquear presets
   pequenos; clamps do `LoadIni` também são baixos (64x40) por isso.
-- **Linha de pico**: marca branca de 2px na posição do pico; hold de ~0,7 s
+- **Linha de pico**: traço branco de 2px **no vão entre LEDs** (índice
+  `PeakGapIndex`, alinhado ao LED do nível), atravessando a barra e
+  sobressaindo 2px de cada lado; o vão existe justamente para a marca não
+  cobrir um segmento — desenhada na posição contínua do pico ela caía em cima
+  de um LED e parecia um LED branco aceso. Hold de ~0,7 s
   (`PEAK_HOLD_TICKS`) e queda `PEAK_FALL` por tick. Ela é alimentada pelo
   **nível exibido** (`gHold`), não pelo pico cru do buffer: com música
   comprimida o pico instantâneo bate no teto a cada buffer (~45 ms) e re-arma o

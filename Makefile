@@ -19,10 +19,17 @@ OBJS := $(SRCS:src/%.cpp=build/%.o)
 DEPS := $(OBJS:.o=.d)
 RES  := build/app.res
 OUT  := output/VULed.exe
+VER  := $(shell cat version.txt)
 
-.PHONY: all clean
+.PHONY: all clean check-version
 
-all: $(OUT)
+all: check-version $(OUT)
+
+# version.txt é a fonte da verdade; src/app/version.h é o que o app compila
+# (texto do "Sobre..."). Falha o build se os dois divergirem.
+check-version:
+	@grep -q 'APP_VERSION = L"$(VER)"' src/app/version.h || \
+	  { echo "erro: version.txt ($(VER)) diverge de src/app/version.h"; exit 1; }
 
 # build/ui/main_window.o <- src/ui/main_window.cpp (mkdir para subpastas)
 build/%.o: src/%.cpp
