@@ -5,31 +5,54 @@ loopback. C++ puro (Win32 + GDI), zero dependências externas.
 
 ## Código
 
-- `src/main.cpp` — app inteiro (janela + captura WASAPI + desenho dos LEDs)
-- `src/app.rc` + `src/app.ico` + `src/resource.h` — ícone embutido no `.exe`
+Fontes organizados por responsabilidade (cada tela/menu em seu arquivo). Os
+includes usam sempre o caminho a partir de `src/` (o build passa `-I src`):
+
+- `src/main.cpp` — entrada (`wWinMain`): instância única, ícones, registro das
+  classes, criação da janela e loop de mensagens (acelerador Alt+F4)
+- `src/app/ids.h` — constantes (layout, `DB_MIN`, `RELEASE`, pico, escalas),
+  IDs de comando/controle e nomes de classe
+- `src/app/state.{h,cpp}` — estado compartilhado: preferências em memória,
+  níveis/picos (`gHold*`, `gPeak*`) e handles `gMain`/`gOpts`
+- `src/app/config.{h,cpp}` — `VULed.ini` (load/save) e "Iniciar com o Windows"
+  (`HKCU\...\Run`)
+- `src/audio/capture.{h,cpp}` — captura WASAPI loopback (`struct AudioCapture`)
+- `src/gfx/render.{h,cpp}` — desenho dos LEDs/rótulos/linha de pico e o modo
+  camada (DIB 32bpp + `UpdateLayeredWindow`)
+- `src/ui/main_window.{h,cpp}` — `WndProc` principal: timer de captura,
+  pintura, arrasto e as ações de janela (moldura, topmost, transparência,
+  layout, escala)
+- `src/ui/options_window.{h,cpp}` — janela "Opções..." (controles criados em
+  código, sem `.rc`)
+- `src/ui/menu.{h,cpp}` — menu de contexto (clique direito ou bandeja)
+- `src/ui/tray.{h,cpp}` — ícone da bandeja (`Shell_NotifyIconW`)
+- `src/res/app.rc` + `app.ico` + `resource.h` — ícone embutido no `.exe`
   (`IDI_APP`, 16/24/32/48/64/128 px; gerado dos PNGs `icon32x32.png` /
   `icon128x128.png` na raiz). O Explorer/taskbar leem o **recurso** ICON, não o
   `.ico`, por isso o `app.rc` é compilado com `windres` e linkado junto.
 - `output/VULed.exe` — binário compilado (cross-compile a partir do WSL)
 - `output/VULed.ini` — preferências persistidas; fica ao lado do `.exe` porque
-  é ali que o app lê/grava (`MakeIniPath` usa `GetModuleFileNameW`)
-- `build/` — temporários de build (objetos); **não** versionado (`.gitignore`)
+  é ali que o app lê/grava (`ConfigInit` usa `GetModuleFileNameW`)
+- `build/` — temporários de build (objetos espelhando as pastas de `src/`);
+  **não** versionado (`.gitignore`)
 
 ## Build (MinGW-w64 a partir do WSL)
 
 ```sh
-make          # compila src/main.cpp + src/app.rc -> output/VULed.exe
+make          # compila src/**/*.cpp + src/res/app.rc -> output/VULed.exe
 make clean    # apaga só os temporários (build/), preserva output/
 ```
 
-Sem `make` (três etapas, para os temporários irem para `build/`):
+Sem `make` (três etapas, para os temporários irem para `build/`; repetir a
+compilação para cada `.cpp` de `src/`):
 
 ```sh
-x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -municode -mwindows \
+x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -municode -mwindows -I src \
   -c src/main.cpp -o build/main.o
-x86_64-w64-mingw32-windres -I src -O coff -o build/app.res src/app.rc
+x86_64-w64-mingw32-windres -I src/res -O coff -o build/app.res src/res/app.rc
 x86_64-w64-mingw32-g++ -static -municode -mwindows -o output/VULed.exe \
-  build/main.o build/app.res \
+  build/main.o build/app/*.o build/audio/*.o build/gfx/*.o build/ui/*.o \
+  build/app.res \
   -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -ladvapi32 -lshell32
 ```
 
@@ -59,8 +82,8 @@ verificação é compilar e rodar o `.exe` no Windows.
 
 - **GUID `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`**: o `ksmedia.h` do MinGW-w64 não
   fornece a definição (dá `undefined reference`). O código define o GUID
-  manualmente no topo de `src/main.cpp`. Não inclua `ksmedia.h` nem `initguid.h`
-  para "resolver" isso.
+  manualmente no topo de `src/audio/capture.cpp`. Não inclua `ksmedia.h` nem
+  `initguid.h` para "resolver" isso.
 - **WASAPI loopback só entrega dados quando há playback ativo.** Sem som
   tocando, as barras ficam zeradas — é comportamento esperado, não bug.
 - **Mutar o endpoint padrão NÃO silencia o loopback** (o tap é antes do
@@ -113,9 +136,9 @@ verificação é compilar e rodar o `.exe` no Windows.
   `Tamanho:` (submenu de radio: 25%..400%, padrão 100%), `Sobre...` (mostra
   "(2026) Copyleft by adrian.barbosa@gmail.com"), separador e `Sair\tAlt+F4`.
   `Sair` é `IDM_EXIT` → `DestroyWindow`; o Alt+F4 funciona também sem moldura
-  (`WS_POPUP` sem sysmenu) por uma tabela de aceleradores (`gAccel` +
-  `TranslateAcceleratorW` no loop de mensagens) — sem ela o `DefWindowProc`
-  não fecharia a janela sem sysmenu.
+  (`WS_POPUP` sem sysmenu) por uma tabela de aceleradores (`hAccel` em
+  `src/main.cpp` + `TranslateAcceleratorW` no loop de mensagens) — sem ela o
+  `DefWindowProc` não fecharia a janela sem sysmenu.
 - **Escala (`ApplyScale`)**: redimensiona mantendo o canto superior esquerdo;
   a % atual é derivada da largura do cliente (base 300 em H / 75 em V), não de
   uma variável — o menu marca a entrada mais próxima. O mínimo de
@@ -190,6 +213,10 @@ verificação é compilar e rodar o `.exe` no Windows.
 - Preferências são lidas no `wWinMain` *antes* do `CreateWindow` (posição/tam.
   e `Title`, que define o estilo inicial, entram direto na criação); não mover
   essa leitura para depois.
+- **Módulos**: cada janela/menu/serviço em seu próprio arquivo (ver "Código");
+  includes sempre no formato `"pasta/arquivo.h"` (o build passa `-I src`) e
+  nenhum `.cpp` inclui outro `.cpp`. Estado compartilhado só em
+  `app/state.h`; o que é de uso interno fica `static` no módulo.
 
 ## Convenções
 
