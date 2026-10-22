@@ -106,11 +106,18 @@ verificação é compilar e rodar o `.exe` no Windows.
   não usar.
 - **Flicker**: `WM_PAINT` usa double buffering (DC memória + um único `BitBlt`)
   e o timer só chama `InvalidateRect` se houve mudança de LEDs, o hold está
-  acima de zero, ou (`gShowPeak` e pico ativo — `peakBusy`). Repintar a tela
+  acima de zero, ou (`gShowPeak` e pico ativo — `peakVisible`/`gPeakWasVisible`,
+  este último só para o repaint que apaga o LED do pico). Repintar a tela
   direto a 100 Hz, ou continuar repaintando com tudo em zero (caso "sem som"),
   causa flicker visível — preservar essas proteções ao mexer no desenho. No
   modo camada o repaint sai de `RequestRepaint()`, que chama `RenderLayered()`
   na hora (janela em camadas não repinta por `InvalidateRect`).
+- **Rótulos L/R**: `DrawAll` seleciona `DEFAULT_GUI_FONT` e mede cada letra com
+  `GetTextExtentPoint32W` (L e R têm larguras diferentes); a fonte padrão do DC
+  (System) é mais alta que a faixa de 14 px e as letras saíam **cortadas
+  embaixo**, e posições fixas (`x + colW/2 - 4`, `x = 3`) deixavam o "R" embaixo
+  do primeiro LED. As faixas `labelH`/`labelW` derivam do texto medido — não
+  voltar a números mágicos.
 - **Transparência ⇒ janela em camadas.** Com `Trans > 0` o app usa
   `WS_EX_LAYERED` + `UpdateLayeredWindow` (alpha por pixel), e isso
   **substitui a janela inteira**: a moldura/barra de título do sistema deixa de

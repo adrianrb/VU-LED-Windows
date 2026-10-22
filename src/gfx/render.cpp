@@ -78,12 +78,27 @@ void DrawAll(HDC hdc, int W, int H) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(170, 170, 170));
 
+    // Rótulos L/R: a fonte padrão do DC (System) é alta demais para a faixa de
+    // 14px e as letras saíam cortadas embaixo. Usa a fonte de UI e mede o texto
+    // de verdade (L e R têm larguras diferentes) para dimensionar/centrar.
+    HGDIOBJ oldFont = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    SIZE gl[2] = { { 6, 12 }, { 6, 12 } };   // extents de "L" e "R"
+    const wchar_t* glTxt[2] = { L"L", L"R" };
+    SIZE m;
+    for (int ch = 0; ch < 2; ++ch) {
+        if (GetTextExtentPoint32W(hdc, glTxt[ch], 1, &m) && m.cx > 0 && m.cy > 0)
+            gl[ch] = m;
+    }
+    int lblW = std::max((int)gl[0].cx, (int)gl[1].cx);
+    int lblH = std::max((int)gl[0].cy, (int)gl[1].cy);
+
     int lit[2] = { LevelToLitCount(gHoldL), LevelToLitCount(gHoldR) };
     int peakLit[2] = { PeakLitCount(gPeakL), PeakLitCount(gPeakR) };
 
     if (gLayout == 0) {
         // Horizontal: barras empilhadas (L em cima, R embaixo), crescem p/ direita.
-        const int labelW = 14, mt = 6, mb = 6, rowGap = 8;
+        const int mt = 6, mb = 6, rowGap = 8;
+        int labelW = lblW + 5;
         int rowH = std::max(4, (H - mt - mb - rowGap) / 2);
         int areaX = labelW;
         int areaW = std::max(LED_COUNT, W - labelW - 6);
@@ -98,11 +113,13 @@ void DrawAll(HDC hdc, int W, int H) {
                 DrawLed(hdc, x, y, segW, rowH, (i < lit[ch] || peakLed) ? on
                         : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
-            TextOut(hdc, 3, y + rowH / 2 - 6, (ch == 0) ? L"L" : L"R", 1);
+            TextOut(hdc, (labelW - (int)gl[ch].cx) / 2, y + (rowH - (int)gl[ch].cy) / 2,
+                    glTxt[ch], 1);
         }
     } else {
         // Vertical: colunas lado a lado (L esq., R dir.), crescem de baixo p/ cima.
-        const int labelH = 14, mt = 6, mx = 6, colGap = 10;
+        const int mt = 6, mx = 6, colGap = 10;
+        int labelH  = lblH + 4;
         int areaH   = std::max(LED_COUNT, H - mt - labelH);
         int segH    = (areaH - (LED_COUNT - 1) * LED_GAP) / LED_COUNT;
         int colW    = std::max(4, (W - 2 * mx - colGap) / 2);
@@ -117,10 +134,13 @@ void DrawAll(HDC hdc, int W, int H) {
                 DrawLed(hdc, x, y, colW, segH, (i < lit[ch] || peakLed) ? on
                         : (gScheme == 0 ? offAll : LedOffColor(on)));
             }
-            TextOut(hdc, x + colW / 2 - 4, H - labelH + 2,
-                    (ch == 0) ? L"L" : L"R", 1);
+            // Centraliza no eixo X da coluna e mantém a letra dentro da janela.
+            int lx = std::clamp(x + (colW - (int)gl[ch].cx) / 2, 0,
+                                std::max(0, W - (int)gl[ch].cx));
+            TextOut(hdc, lx, H - labelH + 2, glTxt[ch], 1);
         }
     }
+    SelectObject(hdc, oldFont);
     SelectObject(hdc, oldPen);
 }
 
