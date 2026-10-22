@@ -30,7 +30,7 @@ x86_64-w64-mingw32-g++ -O2 -std=c++17 -Wall -municode -mwindows \
 x86_64-w64-mingw32-windres -I src -O coff -o build/app.res src/app.rc
 x86_64-w64-mingw32-g++ -static -municode -mwindows -o output/VULed.exe \
   build/main.o build/app.res \
-  -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -ladvapi32
+  -lole32 -luuid -lgdi32 -luser32 -lcomdlg32 -lcomctl32 -ladvapi32 -lshell32
 ```
 
 `-static` é **obrigatório**: sem ele o `.exe` depende de `libstdc++-6.dll` /
@@ -63,6 +63,11 @@ verificação é compilar e rodar o `.exe` no Windows.
   para "resolver" isso.
 - **WASAPI loopback só entrega dados quando há playback ativo.** Sem som
   tocando, as barras ficam zeradas — é comportamento esperado, não bug.
+- **Mutar o endpoint padrão NÃO silencia o loopback** (o tap é antes do
+  volume/mute do dispositivo). Para testar o decaimento com silêncio é preciso
+  zerar o volume da *sessão* do player (`ISimpleAudioVolume`) ou parar o áudio;
+  `keybd_event(VK_VOLUME_MUTE)` não serve (e ainda deixa o sistema mudo se o
+  teste falhar no meio).
 - **`IAudioCaptureClient::GetBuffer` retorna `E_POINTER`** com ponteiro nulo;
   não há como só consultar o tamanho do pacote. Sempre drenar com buffers reais.
 - Se o dispositivo padrão for removido/trocado, `GetBuffer` retorna
@@ -103,7 +108,8 @@ verificação é compilar e rodar o `.exe` no Windows.
 
 ## Interação / preferências
 
-- **Menu**: clique direito na janela → `Opções...` (janela de configurações),
+- **Menu**: clique direito na janela (ou clique no ícone da bandeja) →
+  `Opções...` (janela de configurações),
   `Tamanho:` (submenu de radio: 25%..400%, padrão 100%), `Sobre...` (mostra
   "(2026) Copyleft by adrian.barbosa@gmail.com"), separador e `Sair\tAlt+F4`.
   `Sair` é `IDM_EXIT` → `DestroyWindow`; o Alt+F4 funciona também sem moldura
@@ -115,9 +121,22 @@ verificação é compilar e rodar o `.exe` no Windows.
   uma variável — o menu marca a entrada mais próxima. O mínimo de
   `WM_GETMINMAXINFO` é dinâmico (25% + moldura) para não bloquear presets
   pequenos; clamps do `LoadIni` também são baixos (64x40) por isso.
-- **Linha de pico**: marca branca de 2px na posição do pico; hold de 600 ms
-  (`PEAK_HOLD_TICKS`) e queda `PEAK_FALL` por tick. Desligar zera `gPeakL/R`
-  (senão a marca fica congelada).
+- **Linha de pico**: marca branca de 2px na posição do pico; hold de ~0,7 s
+  (`PEAK_HOLD_TICKS`) e queda `PEAK_FALL` por tick. Ela é alimentada pelo
+  **nível exibido** (`gHold`), não pelo pico cru do buffer: com música
+  comprimida o pico instantâneo bate no teto a cada buffer (~45 ms) e re-arma o
+  hold para sempre — a marca fica congelada no topo enquanto as barras dançam.
+  Depois do hold o pico cai e, ao alcançar o nível, passa a acompanhá-lo (nunca
+  fica abaixo da barra). Desligar zera `gPeakL/R` (senão a marca fica
+  congelada).
+- **Bandeja (tray)**: ícone adicionado em `WM_CREATE` (`Shell_NotifyIconW`
+  `NIM_ADD`, callback `WM_TRAYICON = WM_APP+1`) e removido em `WM_DESTROY`.
+  Clique esquerdo/direito abre o **mesmo** menu de contexto. O menu da bandeja
+  usa `TPM_BOTTOMALIGN` e abre 8 px acima do cursor: se abrisse sobre ele, o
+  segundo clique de um duplo clique cairia no último item (`Sair`) e fecharia o
+  app. O ícone é recriado quando o Explorer reinicia (mensagem registrada
+  `TaskbarCreated`). No Windows 11 ícones novos caem no "mostrar ícones
+  ocultos" — é o usuário que fixa na barra; não há como forçar por código.
 - **Esquema de cores** (`gScheme`): 0 = simples (cor única `gLedOn`,
   picker habilitado); 1 = faixas Verde/Amarelo/Vermelho em 70%/85% da posição
   do LED — o picker fica desabilitado e cada LED apagado usa a própria cor ×30%.
@@ -178,4 +197,6 @@ verificação é compilar e rodar o `.exe` no Windows.
   `-municode` no build). Janela padrão 300x75 (redimensionável; mínimo dinâmico
   = escala 25% + moldura), fundo preto, LEDs ciano padrão `RGB(0,230,255)`
   (configurável; apagado é a cor acesa × 30%), 26 LEDs por canal,
-  escala −60..0 dB, ataque instantâneo + decaimento por tick (`RELEASE`).
+  escala −60..0 dB, ataque instantâneo + decaimento por tick (`RELEASE` = 0.97,
+  ~-17 dB/s reais — antes era 0.85, que piscava os LEDs e fazia o pico parecer
+  congelado).

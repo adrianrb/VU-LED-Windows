@@ -25,6 +25,7 @@
 #include <mmreg.h>
 #include <commdlg.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -46,7 +47,7 @@ static const int DEFAULT_H  = 75;
 static const int LED_COUNT  = 26;
 static const int LED_GAP    = 2;
 static const float DB_MIN   = -60.0f;
-static const float RELEASE  = 0.85f;  // decaimento por tick de 10 ms
+static const float RELEASE  = 0.97f;  // queda das barras por tick (~-17 dB/s, VU clássico)
 
 static const COLORREF COL_BG = RGB(0, 0, 0);
 
@@ -76,8 +77,8 @@ enum {
 static const int SCALES[] = { 25, 50, 75, 100, 125, 150, 200, 300, 400 };
 static const int SCALE_COUNT = (int)(sizeof(SCALES) / sizeof(SCALES[0]));
 
-static const int PEAK_HOLD_TICKS = 60;   // hold do pico: 600 ms (60 × 10 ms)
-static const float PEAK_FALL = 0.97f;    // queda do pico após o hold
+static const int PEAK_HOLD_TICKS = 45;   // hold do pico: ~0,7 s
+static const float PEAK_FALL = 0.95f;    // queda do pico após o hold (~-28 dB/s)
 
 static const wchar_t* MAIN_CLASS = L"VULedMeter";
 static const wchar_t* OPT_CLASS  = L"VUOptions";
@@ -215,6 +216,12 @@ static bool gDragging = false;
 static POINT gDragStart = {};
 static RECT  gDragRect = {};
 static int   gLastLitL = -1, gLastLitR = -1;  // suprime repaint quando ocioso
+
+// Ícone na bandeja (tray): clique abre o mesmo menu de contexto.
+static const UINT WM_TRAYICON = WM_APP + 1;
+static NOTIFYICONDATAW gNid = {};
+static UINT  gTaskbarCreated = 0;        // mensagem "TaskbarCreated" (Explorer reiniciou)
+static HICON gTrayIcon = nullptr;
 
 // Buffer 32bpp do modo camada (transparência do fundo).
 static HBITMAP gDib = nullptr;
@@ -839,7 +846,7 @@ static void ApplyScale(int pct) {
     RequestRepaint();
 }
 
-static void ShowContextMenu(HWND owner) {
+static void ShowContextMenu(HWND owner, bool fromTray = false) {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_OPTIONS, L"Opções...");
 
@@ -868,16 +875,56 @@ static void ShowContextMenu(HWND owner) {
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(owner);            // necessário p/ o menu fechar sozinho
-    TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
-                   pt.x, pt.y, 0, owner, nullptr);
+    // Na bandeja o menu abre acima do cursor (com 1-2 px de folga): se abrisse
+    // sobre ele, o segundo clique de um duplo clique cairia no último item
+    // ("Sair") e fecharia o app sem querer.
+    UINT flags = TPM_RIGHTBUTTON | TPM_LEFTALIGN |
+                 (fromTray ? TPM_BOTTOMALIGN : TPM_TOPALIGN);
+    int x = fromTray ? pt.x - 8 : pt.x;
+    int y = fromTray ? pt.y - 8 : pt.y;
+    TrackPopupMenu(m, flags, x, y, 0, owner, nullptr);
     PostMessageW(owner, WM_NULL, 0, 0);
     DestroyMenu(m);
 }
 
+// ---------------------------------------------------------------------------
+// Bandeja: adiciona/remove o ícone do app
+// ---------------------------------------------------------------------------
+static void TrayAdd(HWND hwnd) {
+    ZeroMemory(&gNid, sizeof(gNid));
+    gNid.cbSize           = sizeof(gNid);
+    gNid.hWnd             = hwnd;
+    gNid.uID              = 1;
+    gNid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    gNid.uCallbackMessage = WM_TRAYICON;
+    gNid.hIcon            = gTrayIcon;
+    lstrcpynW(gNid.szTip, L"VU — Saída Padrão",
+              (int)(sizeof(gNid.szTip) / sizeof(gNid.szTip[0])));
+    Shell_NotifyIconW(NIM_ADD, &gNid);
+}
+
+static void TrayRemove() {
+    if (gNid.hWnd) Shell_NotifyIconW(NIM_DELETE, &gNid);
+    ZeroMemory(&gNid, sizeof(gNid));
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Explorer reiniciou: readiciona o ícone da bandeja.
+    if (gTaskbarCreated && msg == gTaskbarCreated) { TrayAdd(hwnd); return 0; }
+
     switch (msg) {
     case WM_CREATE:
+        TrayAdd(hwnd);                           // ícone na bandeja
         SetTimer(hwnd, IDT_AUDIO, 10, nullptr);  // tick de 10 ms
+        return 0;
+
+    case WM_TRAYICON:
+        // Clique esquerdo ou direito no ícone: abre o mesmo menu de contexto.
+        if (LOWORD(lParam) == WM_LBUTTONUP ||
+            LOWORD(lParam) == WM_RBUTTONUP ||
+            LOWORD(lParam) == WM_CONTEXTMENU) {
+            ShowContextMenu(hwnd, true);
+        }
         return 0;
 
     case WM_SIZE:
@@ -895,14 +942,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (gHoldL < 1e-5f) gHoldL = 0.0f;
             if (gHoldR < 1e-5f) gHoldR = 0.0f;
 
-            // Linha de pico: segue o pico, segura 600 ms, depois cai.
+            // Linha de pico: sobe com o nível exibido, segura ~0,7 s e cai.
+            // Usar o nível suavizado (gHold) em vez do pico cru evita que o
+            // marcador fique grudado no topo: com música comprimida o pico
+            // instantâneo bate no teto a cada buffer (~45 ms) e re-arma o hold
+            // para sempre. Depois do hold o pico cai e, se alcançar o nível,
+            // passa a acompanhá-lo (nunca fica abaixo da barra).
             auto updPeak = [](float lvl, float& peak, int& hold) {
-                if (lvl >= peak) { peak = lvl; hold = PEAK_HOLD_TICKS; }
+                if (lvl > peak) { peak = lvl; hold = PEAK_HOLD_TICKS; }
                 else if (hold > 0) { --hold; }
-                else { peak *= PEAK_FALL; if (peak < 1e-5f) peak = 0.0f; }
+                else { peak *= PEAK_FALL; if (peak < lvl) peak = lvl; }
+                if (peak < 1e-5f) peak = 0.0f;
             };
-            updPeak(pl, gPeakL, gPeakHoldL);
-            updPeak(pr, gPeakR, gPeakHoldR);
+            updPeak(gHoldL, gPeakL, gPeakHoldL);
+            updPeak(gHoldR, gPeakR, gPeakHoldR);
 
             int litL = LevelToLitCount(gHoldL);
             int litR = LevelToLitCount(gHoldR);
@@ -1027,6 +1080,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DESTROY:
         SaveIni();          // persiste tudo (inclusive toggles fora do "Salvar")
+        TrayRemove();
         FreeDib();
         KillTimer(hwnd, IDT_AUDIO);
         gAudio.Shutdown();
@@ -1070,6 +1124,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     HICON hIconSm  = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
                                        GetSystemMetrics(SM_CXSMICON),
                                        GetSystemMetrics(SM_CYSMICON), 0);
+    gTrayIcon = hIconSm;   // mesmo ícone na bandeja
+    gTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEX wc = { sizeof(wc) };
     wc.style         = CS_DBLCLKS;           // habilita WM_LBUTTONDBLCLK
