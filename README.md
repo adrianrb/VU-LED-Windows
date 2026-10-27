@@ -28,9 +28,15 @@ sem instalador e sem bibliotecas externas.
 > reproduzido. Com silêncio (ou nada tocando), as barras ficam zeradas — isso é
 > o comportamento esperado, não um defeito.
 
+<p align="center">
+  <img src="docs/screenshots/transparency.png" width="600" alt="VU LED Meter com fundo semitransparente sobre um gradiente"><br>
+  <sub>Transparência do fundo (exemplo sobre um gradiente)</sub>
+</p>
+
 ## Índice
 
 - [Recursos](#recursos)
+- [Capturas de tela](#capturas-de-tela)
 - [Download e execução](#download-e-execução)
 - [Como usar](#como-usar)
 - [Janela Opções](#janela-opções)
@@ -60,14 +66,20 @@ sem instalador e sem bibliotecas externas.
 - **Preferências persistentes** em `VULed.ini`, ao lado do executável.
 - **Sem dependências**: um `.exe` estático de ~820 KB, apenas APIs do Windows.
 
-Prévia do layout horizontal (esquema de faixas):
+## Capturas de tela
 
-```text
-┌──────────────────────────────────────────────┐
-│ L  ▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▯▯▯              │
-│ R  ▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▯              │
-└──────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/screenshots/main-horizontal.png" width="616" alt="Janela horizontal do VU LED Meter, com LEDs verdes, amarelos e vermelhos"><br>
+  <sub>Horizontal, esquema por faixas, com barra de título</sub>
+</p>
+
+| Vertical | Opções |
+| :---: | :---: |
+| <img src="docs/screenshots/main-vertical.png" width="150" alt="Modo vertical do VU LED Meter, em ciano"> | <img src="docs/screenshots/options.png" width="476" alt="Janela Opções do VU LED Meter"> |
+| <sub>Modo vertical, esquema simples</sub> | <sub>Janela Opções</sub> |
+
+<sub>As capturas usam níveis de exemplo para manter as barras estáveis; em
+execução normal o app lê o áudio real do dispositivo padrão.</sub>
 
 ## Download e execução
 
