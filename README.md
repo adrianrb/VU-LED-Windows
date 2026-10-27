@@ -14,6 +14,7 @@
   <img alt="Win32" src="https://img.shields.io/badge/API-Win32%20%2B%20GDI%20%2B%20WASAPI-4B5563">
   <img alt="Sem dependências" src="https://img.shields.io/badge/depend%C3%AAncias-nenhuma-2EA043">
   <img alt="Versão" src="https://img.shields.io/badge/vers%C3%A3o-1.6.3-blue">
+  <a href="https://github.com/adrianrb/VU-LED-Windows/releases/latest"><img alt="Última release" src="https://img.shields.io/github/v/release/adrianrb/VU-LED-Windows?label=release&color=2EA043"></a>
 </p>
 
 ---
@@ -83,7 +84,9 @@ execução normal o app lê o áudio real do dispositivo padrão.</sub>
 
 ## Download e execução
 
-1. Baixe `output/VULed.exe` deste repositório.
+1. Baixe o `VULed.exe` na
+   [página de releases](https://github.com/adrianrb/VU-LED-Windows/releases/latest)
+   ([download direto](https://github.com/adrianrb/VU-LED-Windows/releases/latest/download/VULed.exe)).
 2. Coloque em uma pasta com permissão de escrita (por exemplo,
    `C:\Users\<você>\VULed\`) — o app grava `VULed.ini` ao lado do executável.
 3. Execute. Na primeira vez o Windows SmartScreen pode avisar que o arquivo é
