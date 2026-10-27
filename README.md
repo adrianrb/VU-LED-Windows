@@ -13,7 +13,7 @@
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Win32" src="https://img.shields.io/badge/API-Win32%20%2B%20GDI%20%2B%20WASAPI-4B5563">
   <img alt="Sem dependências" src="https://img.shields.io/badge/depend%C3%AAncias-nenhuma-2EA043">
-  <img alt="Versão" src="https://img.shields.io/badge/vers%C3%A3o-1.6.3-blue">
+  <img alt="Versão" src="https://img.shields.io/badge/vers%C3%A3o-1.7.0-blue">
   <a href="https://github.com/adrianrb/VU-LED-Windows/releases/latest"><img alt="Última release" src="https://img.shields.io/github/v/release/adrianrb/VU-LED-Windows?label=release&color=2EA043"></a>
 </p>
 
@@ -63,9 +63,11 @@ sem instalador e sem bibliotecas externas.
 - **Transparência do fundo** de 0% a 100%, ajustável em tempo real. LEDs, texto
   e pico permanecem opacos.
 - **Sempre visível** (topmost) e **Iniciar com o Windows** (opcional).
+- **Barra de tarefas acompanha a barra de título**: com moldura o app aparece
+  normalmente; sem moldura (ou com transparência) ele some da barra de tarefas.
 - **Ícone na bandeja** e instância única.
 - **Preferências persistentes** em `VULed.ini`, ao lado do executável.
-- **Sem dependências**: um `.exe` estático de ~820 KB, apenas APIs do Windows.
+- **Sem dependências**: um `.exe` estático de ~1,2 MB, apenas APIs do Windows.
 
 ## Capturas de tela
 
@@ -102,7 +104,7 @@ Visual C++ ou qualquer outra coisa.
 | --- | --- |
 | Clique direito na janela | Abre o menu: `Opções...`, `Tamanho:`, `Sobre...`, `Sair` |
 | Clique esquerdo no ícone da bandeja | Abre o mesmo menu |
-| Duplo clique na janela | Mostra/oculta a barra de título |
+| Duplo clique na janela | Mostra/oculta a barra de título e, junto, o botão na barra de tarefas |
 | Arrastar a janela sem barra de título | Move a janela (o app faz o arrasto manual) |
 | `Alt+F4` | Fecha o app (funciona também sem moldura) |
 
@@ -121,7 +123,7 @@ Acesse por **clique direito → Opções...**.
 
 | Controle | Descrição |
 | --- | --- |
-| **Exibir barra de título** | Alterna a moldura do sistema. Fica desabilitado enquanto houver transparência (os dois modos não coexistem). |
+| **Exibir barra de título** | Alterna a moldura do sistema e o botão na barra de tarefas. Fica desabilitado enquanto houver transparência (os dois modos não coexistem). |
 | **Alternar para Vertical/Horizontal** | Inverte o layout e troca largura ↔ altura para preservar a área do medidor. |
 | **Exibir pico** | Liga/desliga o LED de pico com hold. |
 | **Sempre visível** | Mantém a janela acima das demais (ligado por padrão). |
@@ -139,7 +141,9 @@ marcar/desmarcar "Iniciar com o Windows").
 > passa a ser uma janela em camadas (`WS_EX_LAYERED` + `UpdateLayeredWindow`) e
 > não desenha a moldura do sistema. Se você pedir a barra de título (pelo menu
 > Opções ou com duplo clique), a transparência é desligada para que a moldura
-> volte. Religá-la é só arrastar o slider novamente.
+> volte. Religá-la é só arrastar o slider novamente. Como não há barra de
+> título, nesse modo o app também não aparece na barra de tarefas nem no
+> Alt+Tab; o ícone da bandeja continua disponível.
 
 ## Preferências (VULed.ini)
 
@@ -287,6 +291,12 @@ Também fazem parte do repositório:
 - **Transparência:** DIB de 32 bits + `GdiFlush()` + `UpdateLayeredWindow` com
   alpha por pixel. O fundo recebe o alpha solicitado (mínimo 1, para a janela
   continuar clicável/arrastável); LEDs e texto ficam opacos.
+- **Barra de tarefas:** o estilo estendido acompanha a moldura efetiva —
+  `WS_EX_APPWINDOW` com barra de título e `WS_EX_TOOLWINDOW` sem ela. A troca é
+  aplicada com `SWP_FRAMECHANGED` e `ITaskbarList::AddTab/DeleteTab`, o que
+  atualiza o botão na hora inclusive ao sair do modo transparente. Como
+  `WS_EX_TOOLWINDOW` também tira a janela do Alt+Tab, o ícone da bandeja é o
+  acesso garantido nesse estado.
 - **Recuperação de áudio:** se o dispositivo padrão for removido/trocado
   (`AUDCLNT_E_DEVICE_INVALIDATED`), a captura é encerrada e reiniciada
   automaticamente a cada ~1 s.
@@ -322,7 +332,7 @@ Desmarque a opção na janela Opções ou apague o valor `VULedMeter` em
 
 ## Versionamento
 
-A versão atual é **1.6.3**. O projeto usa versionamento semântico simples:
+A versão atual é **1.7.0**. O projeto usa versionamento semântico simples:
 
 - `Z` (patch): correções e alterações que mudam o binário.
 - `Y` (minor): novos comportamentos, como itens de menu ou recursos.

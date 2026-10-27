@@ -86,6 +86,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     bool layered = (gBgTrans > 0);
     DWORD style   = (layered || !gTitleBar) ? WS_POPUP : WS_OVERLAPPEDWINDOW;
     DWORD exStyle = layered ? WS_EX_LAYERED : 0;
+    // A barra de tarefas segue a moldura efetiva: com transparência ativa a
+    // janela também fica sem barra de título e sai da barra de tarefas.
+    exStyle |= FrameEffective() ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW;
     RECT rc = { 0, 0, DEFAULT_W, DEFAULT_H };
     AdjustWindowRect(&rc, style, FALSE);
     int w = gIniWindow.hasWH ? gIniWindow.w : rc.right - rc.left;

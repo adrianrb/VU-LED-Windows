@@ -7,6 +7,8 @@
 #include <cmath>
 #include <string>
 
+#include <shobjidl.h>
+
 #include "app/config.h"
 #include "app/ids.h"
 #include "app/state.h"
@@ -28,6 +30,34 @@ static bool  gPeakWasVisible = false;         // p/ apagar o LED do pico no fim
 // ---------------------------------------------------------------------------
 // Ações
 // ---------------------------------------------------------------------------
+
+// Sem barra de título o app vira um widget de desktop: some da barra de
+// tarefas (e do Alt+Tab). O estilo estendido precisa ser trocado junto com a
+// moldura; o ITaskbarList garante a atualização imediata do botão.
+static void ApplyTaskbarVisibility(bool show) {
+    if (!gMain) return;
+    LONG_PTR ex = GetWindowLongPtr(gMain, GWL_EXSTYLE);
+    ex &= ~(WS_EX_TOOLWINDOW | WS_EX_APPWINDOW);
+    ex |= show ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW;
+    SetWindowLongPtr(gMain, GWL_EXSTYLE, ex);
+    SetWindowPos(gMain, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                 SWP_FRAMECHANGED);
+
+    // O estilo persistente é o que vale depois de reiniciar o Explorer; o
+    // ITaskbarList força a atualização imediata ao sair do modo em camadas,
+    // onde trocar só o ex-style não readiciona o botão.
+    ITaskbarList* tb = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr,
+                                   CLSCTX_INPROC_SERVER, IID_ITaskbarList,
+                                   reinterpret_cast<void**>(&tb))) && tb) {
+        if (SUCCEEDED(tb->HrInit())) {
+            if (show) tb->AddTab(gMain);
+            else      tb->DeleteTab(gMain);
+        }
+        tb->Release();
+    }
+}
 
 // Aplica moldura/barra de título preservando o tamanho da área cliente.
 static void ApplyFrameStyle(bool frame) {
@@ -51,6 +81,7 @@ static void ApplyFrameStyle(bool frame) {
     AdjustWindowRect(&adj, (DWORD)st, FALSE);
     SetWindowPos(gMain, nullptr, 0, 0, adj.right - adj.left, adj.bottom - adj.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    ApplyTaskbarVisibility(frame);
 }
 
 bool FrameEffective() { return gTitleBar && gBgTrans == 0; }

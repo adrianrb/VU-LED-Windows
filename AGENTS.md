@@ -193,6 +193,17 @@ verificação é compilar e rodar o `.exe` no Windows.
   Com moldura o Windows impõe uma largura mínima (`SM_CXMIN`, 136 px em 100%):
   ligar a barra de título numa janela vertical de 75 px alarga o cliente para
   ~120 px — é limitação do sistema, não do app.
+- **Barra de tarefas**: a visibilidade segue a **moldura efetiva**
+  (`FrameEffective()`), não só `gTitleBar`. Com moldura a janela usa
+  `WS_EX_APPWINDOW`; sem moldura (incluindo transparência ativa) usa
+  `WS_EX_TOOLWINDOW`. A troca fica em `ApplyTaskbarVisibility` e é chamada no
+  fim de `ApplyFrameStyle`. O `SetWindowPos(... SWP_FRAMECHANGED)` aplica o
+  estilo; além dele, `ITaskbarList::AddTab/DeleteTab` força a atualização
+  imediata — sair do modo camadas só com o ex-style não readiciona o botão.
+  Como `WS_EX_TOOLWINDOW` também tira a janela do Alt+Tab, o ícone da bandeja
+  continua sendo o acesso nesse estado.
+  No `CreateWindowExW` o mesmo estilo é escolhido antes de criar a janela;
+  não deixar para depois do `ShowWindow` (o botão piscaria no start).
 - **Transparência do fundo** (`gBgTrans`, 0..100, chave `Trans`, padrão 0):
   slider vertical na janela Opções (`TBS_VERT`, incremento 1, **0% embaixo e
   100% no topo**). O trackbar é linear com o mínimo no topo, então o valor é
